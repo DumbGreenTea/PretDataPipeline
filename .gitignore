@@ -1,0 +1,2 @@
+touch logs/.gitkeep
+git add . # Ahora la carpeta 'logs' se agrega porque contiene el archivo '.gitkeep'

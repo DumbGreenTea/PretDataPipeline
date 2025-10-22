@@ -37,6 +37,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 5. Application Code
 # COPIA el resto del código de la aplicación.
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 COPY . .
 
 # 6. Expose Port (Opcional, para documentación)
@@ -47,4 +49,5 @@ EXPOSE 8000
 # Comando que se ejecuta al iniciar el contenedor.
 # Es buena práctica usar un script de inicio o el comando 'gunicorn' o 'uWSGI' para producción.
 # Para desarrollo, este es suficiente.
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

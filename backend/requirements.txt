@@ -7,3 +7,7 @@ pytz==2025.2
 six==1.17.0
 sqlparse==0.5.3
 tzdata==2025.2
+
+# DB drivers and helpers for local development
+psycopg2-binary>=2.9
+dj-database-url>=1.0

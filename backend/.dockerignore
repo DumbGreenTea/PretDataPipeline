@@ -1,0 +1,28 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.env
+*.sqlite3
+.git
+.gitignore
+Dockerfile
+dockerfile
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+.eggs/
+
+# Logs and databases
+*.log
+npm-debug.log*
+
+# VS Code
+.vscode/

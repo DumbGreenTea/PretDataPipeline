@@ -1,0 +1,55 @@
+version: '3.8'
+
+# Orquestador principal de los tres servicios
+
+services:
+  db:
+    image: postgres:14-alpine
+    volumes:
+      # Volumen persistente para los datos de la DB
+      - postgres_data:/var/lib/postgresql/data/
+    # Carga las variables de entorno (DB credentials) desde el archivo .env
+    env_file:
+      - .env
+    ports:
+      - "5432:5432" # Opcional: para acceder desde herramientas de DB externas
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-postgres} -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend # Ubicación del Dockerfile
+      dockerfile: Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000 # Comando de desarrollo (entrypoint will run migrations antes)
+    volumes:
+      # LIVE RELOAD: Sincroniza el código local con el contenedor
+      - ./backend:/app 
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend # Ubicación del Dockerfile
+      dockerfile: Dockerfile
+    command: npm run start # Comando de desarrollo
+    volumes:
+      # LIVE RELOAD: Sincroniza el código local con el contenedor
+      - ./frontend:/app
+      # EXCLUSIÓN: Evita que el node_modules local pise el del contenedor
+      - /app/node_modules 
+    ports:
+      - "3000:3000"
+
+# Volúmenes definidos
+volumes:
+  postgres_data:
+    driver: local

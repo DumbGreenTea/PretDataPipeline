@@ -1,167 +1,245 @@
-.page {
-  --gray-rgb: 0, 0, 0;
-  --gray-alpha-200: rgba(var(--gray-rgb), 0.08);
-  --gray-alpha-100: rgba(var(--gray-rgb), 0.05);
+/*
+ * Este archivo CSS corresponde al page.tsx y usa CSS Módulos.
+ * Tu archivo globals.css (que se carga en layout.tsx)
+ * debería encargarse de los estilos base como el color de fondo del body.
+ */
 
-  --button-primary-hover: #383838;
-  --button-secondary-hover: #f2f2f2;
-
-  display: grid;
-  grid-template-rows: 20px 1fr 20px;
-  align-items: center;
-  justify-items: center;
-  min-height: 100svh;
-  padding: 80px;
-  gap: 64px;
-  font-family: var(--font-geist-sans);
-}
-
-@media (prefers-color-scheme: dark) {
-  .page {
-    --gray-rgb: 255, 255, 255;
-    --gray-alpha-200: rgba(var(--gray-rgb), 0.145);
-    --gray-alpha-100: rgba(var(--gray-rgb), 0.06);
-
-    --button-primary-hover: #ccc;
-    --button-secondary-hover: #1a1a1a;
-  }
-}
-
+/* Contenedor Principal */
 .main {
   display: flex;
   flex-direction: column;
-  gap: 32px;
-  grid-row-start: 2;
+  align-items: center;
+  padding: 2rem;
+  min-height: 100vh;
+  width: 100%;
+  max-width: 1200px; /* Limita el ancho en pantallas grandes */
+  margin: 0 auto;
+  box-sizing: border-box; /* Asegura que el padding no desborde */
 }
 
-.main ol {
-  font-family: var(--font-geist-mono);
-  padding-left: 0;
-  margin: 0;
-  font-size: 14px;
-  line-height: 24px;
-  letter-spacing: -0.01em;
-  list-style-position: inside;
+/* --- Encabezado y Navegación --- */
+.header {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem 0;
+  margin-bottom: 4rem;
 }
 
-.main li:not(:last-of-type) {
-  margin-bottom: 8px;
-}
-
-.main code {
-  font-family: inherit;
-  background: var(--gray-alpha-100);
-  padding: 2px 4px;
-  border-radius: 4px;
+.logo {
+  font-size: 1.5rem;
   font-weight: 600;
-}
-
-.ctas {
-  display: flex;
-  gap: 16px;
-}
-
-.ctas a {
-  appearance: none;
-  border-radius: 128px;
-  height: 48px;
-  padding: 0 20px;
-  border: 1px solid transparent;
-  transition:
-    background 0.2s,
-    color 0.2s,
-    border-color 0.2s;
-  cursor: pointer;
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  line-height: 20px;
+  gap: 0.5rem;
+  color: #111827; /* Añadido: Color de texto oscuro para el logo */
+}
+
+/* Logo simple con CSS */
+.logo span {
+  display: block;
+  width: 24px;
+  height: 24px;
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  border-radius: 6px;
+}
+
+.nav {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.nav a {
+  text-decoration: none;
+  color: #374151; /* Cambiado: Color de texto gris oscuro */
   font-weight: 500;
+  opacity: 0.9; /* Ajustado */
+  transition: opacity 0.2s ease;
 }
 
-a.primary {
-  background: var(--foreground);
-  color: var(--background);
-  gap: 8px;
+.nav a:hover {
+  opacity: 1;
 }
 
-a.secondary {
-  border-color: var(--gray-alpha-200);
-  min-width: 158px;
-}
-
-.footer {
-  grid-row-start: 3;
+/* --- Sección "Hero" --- */
+.hero {
+  text-align: center;
   display: flex;
-  gap: 24px;
-}
-
-.footer a {
-  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 1.5rem;
+  margin-bottom: 6rem;
 }
 
-.footer img {
-  flex-shrink: 0;
+.heroTitle {
+  font-size: 3.5rem;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  /* Efecto de gradiente en el texto */
+  background: linear-gradient(135deg, #4f46e5, #c026d3);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  color: transparent;
 }
 
-/* Enable hover only on non-touch devices */
-@media (hover: hover) and (pointer: fine) {
-  a.primary:hover {
-    background: var(--button-primary-hover);
-    border-color: transparent;
-  }
+.heroSubtitle {
+  font-size: 1.25rem;
+  max-width: 600px;
+  color: #4b5563; /* Cambiado: Color de texto gris */
+  line-height: 1.6;
+}
 
-  a.secondary:hover {
-    background: var(--button-secondary-hover);
-    border-color: transparent;
-  }
+.heroButtons {
+  display: flex;
+  gap: 1rem;
+  margin-top: 1rem;
+}
 
-  .footer a:hover {
-    text-decoration: underline;
-    text-underline-offset: 4px;
+.buttonPrimary,
+.buttonSecondary {
+  padding: 0.75rem 1.5rem;
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.buttonPrimary {
+  background-color: #4f46e5;
+  color: #ffffff;
+}
+
+.buttonPrimary:hover {
+  background-color: #4338ca;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.buttonSecondary {
+  background-color: #e0e7ff;
+  color: #4338ca;
+}
+
+.buttonSecondary:hover {
+  background-color: #c7d2fe;
+}
+
+/* --- Sección de Características --- */
+.features {
+  width: 100%;
+  margin-bottom: 6rem;
+}
+
+.sectionTitle {
+  font-size: 2.5rem;
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: 3rem;
+  color: #111827; /* Añadido: Color de texto oscuro */
+}
+
+.featuresGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2rem;
+}
+
+.card {
+  /*
+   * Forzamos el fondo blanco y borde gris claro, 
+   * ignorando las variables de color-scheme.
+   */
+  background-color: #ffffff;
+  padding: 2rem;
+  border-radius: 12px;
+  border: 1px solid #e5e7eb;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+  transition: all 0.2s ease;
+}
+
+/* Estilos de tarjeta para modo oscuro (se mantiene por si acaso) */
+@media (prefers-color-scheme: dark) {
+  .card {
+    /*
+     * Si el usuario VUELVE al modo oscuro, esto funcionará.
+     * Pero los colores de texto que definimos abajo (oscuros)
+     * se verán mal. Esta es la desventaja de "forzar" los colores.
+     */
+    background-color: #111111;
+    border: 1px solid #222222;
   }
 }
 
-@media (max-width: 600px) {
-  .page {
-    padding: 32px;
-    padding-bottom: 80px;
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+}
+
+.card h3 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: 0.75rem;
+  color: #111827; /* Añadido: Color de texto oscuro */
+}
+
+.card p {
+  line-height: 1.6;
+  color: #4b5563; /* Cambiado: Color de texto gris */
+}
+
+/* --- Pie de Página --- */
+.footer {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-top: 2rem;
+  margin-top: auto;
+  border-top: 1px solid #e5e7eb; /* Borde gris claro */
+  color: #4b5563; /* Cambiado: Color de texto gris */
+}
+
+.socialLinks {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.socialLinks a {
+  text-decoration: none;
+  color: #374151; /* Cambiado: Color de texto gris oscuro */
+}
+
+.socialLinks a:hover {
+  text-decoration: underline;
+}
+
+/* --- Responsividad --- */
+@media (max-width: 768px) {
+  .featuresGrid {
+    grid-template-columns: 1fr; /* Apila las tarjetas en móvil */
   }
 
-  .main {
-    align-items: center;
+  .heroTitle {
+    font-size: 2.5rem;
   }
 
-  .main ol {
-    text-align: center;
+  .heroSubtitle {
+    font-size: 1rem;
   }
 
-  .ctas {
+  .header {
     flex-direction: column;
-  }
-
-  .ctas a {
-    font-size: 14px;
-    height: 40px;
-    padding: 0 16px;
-  }
-
-  a.secondary {
-    min-width: auto;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
   }
 
   .footer {
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: center;
+    flex-direction: column;
+    gap: 1rem;
+    text-align: center;
   }
 }
 
-@media (prefers-color-scheme: dark) {
-  .logo {
-    filter: invert();
-  }
-}

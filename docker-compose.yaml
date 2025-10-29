@@ -46,8 +46,11 @@ services:
     volumes:
       # LIVE RELOAD: sincroniza solo la carpeta app_web (donde está el package.json/next)
       - ./frontend/app_web:/app_web
-      # Evita que el node_modules local pise el del contenedor
-      - /app_web/node_modules
+      # Nota: no montamos un volumen anónimo en /app_web/node_modules porque
+      # ello puede ocultar los módulos instalados en el host o los instalados
+      # en la imagen durante el build. Si quieres aislar node_modules dentro
+      # del contenedor, podemos usar otra estrategia (entrypoint que hace npm install
+      # o un volumen nombrado gestionado explícitamente).
     ports:
       - "3000:3000"
 

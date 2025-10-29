@@ -1,20 +1,26 @@
-# Use the latest LTS version of Node.js
+# Development Dockerfile for Next.js app
+# Uses the development server (npm run dev) and expects a bind mount for hot reload.
 FROM node:18-alpine
- 
-# Set the working directory inside the container
+
+# Create app directory
 WORKDIR /app_web
- 
-# Copy package.json and package-lock.json
+
+# Install build-time dependencies (if any). Keep package.json copies limited for caching.
 COPY app_web/package*.json ./
- 
-# Install dependencies
+
+# Install all dependencies (including devDependencies) so `next dev` can run inside the container.
 RUN npm install
- 
-# Copy the rest of your application files
-COPY . .
- 
-# Expose the port your app runs on
+
+# Copy application source
+COPY app_web/ ./
+
+# Development env
+ENV NODE_ENV=development
+ENV NEXT_TELEMETRY_DISABLED=1
+
+# Port used by Next.js dev server
 EXPOSE 3000
- 
-# Define the command to run your app
-CMD ["npm", "start"]
+
+# Default command runs the Next dev server. For live reload, run the container with a bind mount
+# from your host project directory to /app_web (e.g. using docker-compose or `-v $(pwd)/frontend/app_web:/app_web`).
+CMD ["npm", "run", "dev"]

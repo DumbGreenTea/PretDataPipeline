@@ -1,2 +1,95 @@
-touch logs/.gitkeep
-git add . # Ahora la carpeta 'logs' se agrega porque contiene el archivo '.gitkeep'
+############################
+# OS / editores
+############################
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+############################
+# Entornos / credenciales
+############################
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+ENV/
+__pypackages__/
+
+############################
+# Python / Django
+############################
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+*.log
+*.pot
+db.sqlite3
+db.sqlite3-journal
+# Archivos generados por Django collectstatic (si los sirves por CDN/volumen)
+staticfiles/
+static/
+media/
+# Tests / tooling
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.cache/
+*.cover
+coverage.xml
+
+############################
+# Node / Frontend (React/Vite/Vue/Next/Nuxt)
+############################
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json# ignore? -> normalmente SÍ se versiona; quita esta línea si lo trackeas
+pnpm-lock.yaml# idem
+yarn.lock# idem
+
+# builds y caches comunes
+dist/
+build/
+out/
+coverage/
+.cypress/
+.playwright/
+.parcel-cache/
+.vite/
+.next/
+.nuxt/
+.svelte-kit/
+
+############################
+# Docker / Compose
+############################
+# archivos locales de override
+docker-compose.override.yml
+# artefactos de build temporales
+*.tmp
+*.bak
+
+############################
+# Logs (guardar solo .gitkeep)
+############################
+logs/*
+!logs/.gitkeep
+
+############################
+# Otros
+############################
+*.bak
+*.orig
+*.rej

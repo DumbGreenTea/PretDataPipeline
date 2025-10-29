@@ -39,13 +39,15 @@ services:
   frontend:
     build:
       context: ./frontend # Ubicación del Dockerfile
-      dockerfile: Dockerfile
-    command: npm run start # Comando de desarrollo
+      dockerfile: dockerfile
+    # Ejecutar en modo desarrollo
+    command: npm run dev
+    working_dir: /app_web
     volumes:
-      # LIVE RELOAD: Sincroniza el código local con el contenedor
-      - ./frontend:/app
-      # EXCLUSIÓN: Evita que el node_modules local pise el del contenedor
-      - /app/node_modules 
+      # LIVE RELOAD: sincroniza solo la carpeta app_web (donde está el package.json/next)
+      - ./frontend/app_web:/app_web
+      # Evita que el node_modules local pise el del contenedor
+      - /app_web/node_modules
     ports:
       - "3000:3000"
 

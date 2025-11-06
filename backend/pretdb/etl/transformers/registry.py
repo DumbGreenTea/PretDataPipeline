@@ -6,6 +6,8 @@ from .plan_anterior_transformer import PlanAnteriorTransformer
 from .plan_dia_transformer import PlanDiaTransformer
 from .maquinaria_transformer import DotacionMaquinariaTransformer
 from .ppc_transformer import PPCTransformer
+from .compromiso_transformer import CompromisosTransformer
+from .matriz_cnc_transformer import MatrizCNCTransformer
 # from .asistencia_transformer import AsistenciaTransformer  # cuando lo tengas
 
 REGISTRY = {
@@ -16,6 +18,8 @@ REGISTRY = {
     "plan_dia": PlanDiaTransformer(),
     "dotacion_y_maquinaria": DotacionMaquinariaTransformer(),
     "ppc": PPCTransformer(),
+    "compromisos": CompromisosTransformer(),
+    "matriz_cnc": MatrizCNCTransformer(),
     # "asistencia": AsistenciaTransformer(),
 }
 

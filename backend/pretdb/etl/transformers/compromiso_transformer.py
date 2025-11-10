@@ -1,424 +1,356 @@
-# backend/pretdb/etl/transformers/compromiso_transformer.py
+# pretdb/etl/transformers/compromiso_transformer.py
 from __future__ import annotations
-from typing import Dict, Any, List, Optional, Tuple
-import logging, re, unicodedata, hashlib
+from typing import Dict, Any, List, Optional
+import logging
+import re
+import unicodedata
 from datetime import datetime, date
+
 import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# =============================== utilidades ===============================
+# ------------------------------- utilidades -------------------------------
 
 def _norm(s: Any) -> str:
-    """Quita acentos, pasa a minúsculas y colapsa espacios/punct."""
+    """Quita acentos, pasa a minúsculas y colapsa espacios."""
     if s is None:
+        return ""
+    # NaN de pandas
+    if isinstance(s, float) and np.isnan(s):
         return ""
     s = str(s)
     s = unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"\s+", " ", s.strip().lower())
+    s = s.strip().lower()
+    s = re.sub(r"\s+", " ", s)
     return s
 
-def _is_na_like(x: Any) -> bool:
-    """True si x es None/NaN/NA o string vacío/guiones."""
-    if pd.isna(x):
-        return True
-    if isinstance(x, str):
-        s = x.strip()
-        if s == "" or s in {"-", "—"} or s.lower() in {"na", "nan", "<na>", "none"}:
-            return True
-    return False
 
 def _parse_date_cell(x: Any) -> Optional[date]:
-    """Convierte celdas a date; soporta ISO, d/m/Y y timestamps de Excel."""
-    if _is_na_like(x):
-        return None
+    """Convierte celdas a date (similar a AsistenciaTransformer)."""
     if isinstance(x, (pd.Timestamp, datetime)):
         return x.date()
     if isinstance(x, date):
         return x
-    s = str(x).strip()
-    # ISO primero (year-first)
-    dtt = pd.to_datetime(s, errors="coerce", dayfirst=False)
-    if not pd.isna(dtt):
-        return dtt.date()
-    # luego día/mes primero
-    dtt = pd.to_datetime(s, errors="coerce", dayfirst=True)
-    if not pd.isna(dtt):
-        return dtt.date()
-    return None
 
-def _safe_str(df: pd.DataFrame, r: int, c: Optional[int]) -> Optional[str]:
-    """Getter seguro de string (limpia <NA>/nan y blanks)."""
-    if c is None or c < 0 or c >= df.shape[1] or r < 0 or r >= len(df):
-        return None
-    v = df.iat[r, c]
-    if _is_na_like(v):
-        return None
-    s = str(v).strip()
-    return s if s != "" else None
-
-def _safe_int(df: pd.DataFrame, r: int, c: Optional[int]) -> Optional[int]:
-    """Extrae un entero tolerante a texto (toma el primer número que aparezca)."""
-    if c is None or c < 0 or c >= df.shape[1] or r < 0 or r >= len(df):
-        return None
-    v = df.iat[r, c]
-    if _is_na_like(v):
-        return None
-    m = re.search(r"[-+]?\d+", str(v))
-    if not m:
-        return None
-    try:
-        return int(m.group(0))
-    except Exception:
+    s = (str(x) if x is not None else "").strip()
+    if not s or s.lower() in ("na", "nan", "<na>"):
         return None
 
-def _is_blank_row(row: pd.Series) -> bool:
-    """Fila completamente vacía/NA-like."""
-    for v in row.values:
-        if not _is_na_like(v):
-            return False
-    return True
+    # intentar ISO primero
+    if re.match(r"^\d{4}-\d{2}-\d{2}", s):
+        dt = pd.to_datetime(s, errors="coerce", dayfirst=False)
+    else:
+        dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
 
-def _row_id(item: Optional[int], desc: Optional[str], responsable: Optional[str], categoria: Optional[str], file_name: Optional[str]) -> str:
-    base = "|".join([
-        str(item) if item is not None else "",
-        _norm(desc or ""),
-        _norm(responsable or ""),
-        _norm(categoria or ""),
-        _norm(file_name or ""),
-    ])
-    return hashlib.md5(base.encode("utf-8")).hexdigest()[:16]
+    return None if pd.isna(dt) else dt.date()
 
-# ============================ patrones de header ============================
 
-HEADER_PATS: Dict[str, re.Pattern] = {
-    "item": re.compile(r"\b(i|í)tem\b", re.I),
-    "descripcion": re.compile(r"\bdescrip(cion|ción)\b", re.I),
-    "fecha_toma": re.compile(r"fecha\s*toma(\s*de)?\s*compromiso", re.I),
-    "fecha_cierre_proyectada": re.compile(r"fecha\s*de?\s*cierre\s*proyectada", re.I),
-    "fecha_cierre_efectiva": re.compile(r"fecha\s*(de\s*)?cierre\s*efectiva", re.I),
-    "responsable": re.compile(r"\bresponsable\b", re.I),
-    "status": re.compile(r"\bstatus\b|\bestatus\b", re.I),
-    "observacion": re.compile(r"\bobservaci(o|ó)n\b", re.I),
-}
-REQUIRED_FOR_HEADER = {"item", "descripcion", "status"}  # mínimos para validar encabezado
-
-# ============================= clase transformador =============================
+# ------------------------------ clase principal ------------------------------
 
 class CompromisosTransformer:
     """
-    Extrae la tabla de 'Compromisos' (ignorando el panel 'ESTATUS DE COMPROMISOS'
-    de la derecha). Soporta variaciones con títulos de sección y re-encabezados.
+    Extrae compromisos desde la hoja 'Compromisos' en sus distintas variantes
+    (una única tabla o múltiples bloques por disciplina).
     """
     sheet_key = "compromisos"
 
-    # ---------------------- API para el orquestador ----------------------
-    def run(self, reader, dry_run: bool = False, **kwargs) -> dict:
-        """
-        El orquestador llama run(reader). Aquí resolvemos df y meta desde el reader,
-        y delegamos a run_df(...) como en tus otros transformers.
-        """
-        df, meta = self._get_df_and_meta(reader)
-        return self.run_df(df, meta, dry_run=dry_run, **kwargs)
+    # -------------------------- API p/orquestador --------------------------
 
-    # ---------------------- API estilo otros transformers ----------------------
-    def run_df(self, df_raw: pd.DataFrame, meta: dict, dry_run: bool = False, **kwargs) -> dict:
+    def run_df(
+        self,
+        df_raw: pd.DataFrame,
+        meta: dict,
+        dry_run: bool = False,
+        **kwargs,
+    ) -> dict:
         logger.debug("CompromisosTransformer.run_df: shape=%s", df_raw.shape)
+
         df = df_raw.copy()
+        compromisos = self._extract_compromisos(df)
 
-        header_row, colmap = self._find_header_and_columns(df)
-        if header_row is None:
-            raise ValueError("No se pudo detectar el encabezado en 'Compromisos'.")
+        summary = self._build_summary(compromisos)
 
-        parsed_rows: List[Dict[str, Any]] = self._parse_rows(df, header_row, colmap, meta)
+        return {
+            "sheet": self.sheet_key,
+            "rows": len(compromisos),
+            "summary": summary,
+            "compromisos_detail": compromisos,
+            "dry_run": dry_run,
+        }
 
-        # ---- Salidas: unified & flat ----
-        unified_rows: List[Dict[str, Any]] = []
-        flat_rows: List[Dict[str, Any]] = []
+    # --------------------------- helpers internos ---------------------------
 
-        for r in parsed_rows:
-            rid = _row_id(r.get("item"), r.get("descripcion"), r.get("responsable"), r.get("categoria"), meta.get("file_name"))
-            unified = {
-                "row_id": rid,
-                "meta": {"categoria": r.get("categoria"), "nro_pod": meta.get("nro_pod")},
-                "compromiso": {
-                    "item": r.get("item"),
-                    "descripcion": r.get("descripcion"),
-                    "responsable": r.get("responsable"),
-                    "status": r.get("status"),
-                    "observacion": r.get("observacion"),
-                },
-                "fechas": {
-                    "toma": r.get("fecha_toma").isoformat() if isinstance(r.get("fecha_toma"), date) else None,
-                    "cierre_proyectada": r.get("fecha_cierre_proyectada").isoformat() if isinstance(r.get("fecha_cierre_proyectada"), date) else None,
-                    "cierre_efectiva": r.get("fecha_cierre_efectiva").isoformat() if isinstance(r.get("fecha_cierre_efectiva"), date) else None,
-                },
-            }
-            unified_rows.append(unified)
+    def _find_header_rows(self, df: pd.DataFrame) -> List[int]:
+        """
+        Detecta filas de encabezado de tabla (las que contienen 'Ítem' / 'Item').
+        Limita búsqueda a las primeras ~80 filas.
+        """
+        headers: List[int] = []
+        max_rows = min(len(df), 80)
 
-            flat = {
-                "row_id": rid,
-                "item": r.get("item"),
-                "descripcion": r.get("descripcion"),
-                "fecha_toma": r.get("fecha_toma"),
-                "fecha_cierre_proyectada": r.get("fecha_cierre_proyectada"),
-                "fecha_cierre_efectiva": r.get("fecha_cierre_efectiva"),
-                "responsable": r.get("responsable"),
-                "status": r.get("status"),
-                "observacion": r.get("observacion"),
-                "categoria": r.get("categoria"),
-                "nro_pod": meta.get("nro_pod"),
-            }
-            flat_rows.append(flat)
+        for r in range(max_rows):
+            row = df.iloc[r]
+            found_item = False
+            for val in row:
+                if isinstance(val, str) and "item" in _norm(val):
+                    found_item = True
+                    break
+            if found_item:
+                headers.append(r)
 
-        # ---- Resúmenes ----
-        status_counts = pd.Series([r.get("status") for r in flat_rows], dtype="object").value_counts(dropna=True).to_dict()
-        cat_counts = pd.Series([r.get("categoria") or "(sin categoria)" for r in flat_rows], dtype="object").value_counts().to_dict()
+        logger.debug("Compromisos: header_rows=%s", headers)
+        return headers
+
+    def _build_colmap(self, df: pd.DataFrame, header_row: int) -> Dict[str, Optional[int]]:
+        """
+        A partir de una fila de encabezado, mapea nombre lógico -> índice de columna.
+        Soporta variantes donde la columna de descripción se llama 'Descripción' o
+        trae el nombre de la disciplina ('CONSTRUCCIÓN, LOGISTICA Y BODEGA', etc.).
+        """
+        row = df.iloc[header_row]
+        ncols = df.shape[1]
+
+        item_col = None
+        desc_col = None
+        fecha_toma_col = None
+        fecha_cierre_proj_col = None
+        fecha_cierre_efec_col = None
+        responsable_col = None
+        status_col = None
+        obs_col = None
+
+        for c, val in enumerate(row):
+            if not isinstance(val, str):
+                continue
+            nv = _norm(val)
+
+            if "item" in nv and item_col is None:
+                item_col = c
+            if "descripcion" in nv and desc_col is None:
+                desc_col = c
+            if "fecha toma" in nv and fecha_toma_col is None:
+                fecha_toma_col = c
+            if "cierre" in nv and "proyect" in nv and fecha_cierre_proj_col is None:
+                fecha_cierre_proj_col = c
+            if "cierre" in nv and "efect" in nv and fecha_cierre_efec_col is None:
+                fecha_cierre_efec_col = c
+            if "responsable" in nv and responsable_col is None:
+                responsable_col = c
+            if "status" in nv and status_col is None:
+                status_col = c
+            if "observacion" in nv and obs_col is None:
+                obs_col = c
+
+        # Fallback: descripción justo a la derecha de Ítem
+        if desc_col is None and item_col is not None and item_col + 1 < ncols:
+            desc_col = item_col + 1
+
+        colmap = {
+            "item": item_col,
+            "descripcion": desc_col,
+            "fecha_toma": fecha_toma_col,
+            "fecha_cierre_proyectada": fecha_cierre_proj_col,
+            "fecha_cierre_efectiva": fecha_cierre_efec_col,
+            "responsable": responsable_col,
+            "status": status_col,
+            "observacion": obs_col,
+        }
+
+        logger.debug("Compromisos: colmap(header_row=%s)=%s", header_row, colmap)
+        return colmap
+
+    def _find_categoria_for_header(self, df: pd.DataFrame, header_row: int) -> Optional[str]:
+        """
+        Intenta detectar la categoría / disciplina asociada a un bloque de compromisos:
+        revisa 1–3 filas por encima en la primera columna.
+        """
+        for r in range(header_row - 1, max(-1, header_row - 4), -1):
+            if r < 0:
+                break
+            v = df.iat[r, 0]
+            if not isinstance(v, str):
+                continue
+            nv = _norm(v)
+            if not nv:
+                continue
+            if nv.startswith("item"):
+                continue
+            if "compromisos pod" in nv:
+                continue
+            if "cc 006" in nv:
+                continue
+            # Parece un título de bloque ("HSE SEGURIDAD", "QA/QC", etc.)
+            return v.strip()
+        return None
+
+    def _extract_compromisos(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
+        """
+        Recorre todas las tablas detectadas en la hoja y arma una lista
+        plana de compromisos.
+        """
+        compromisos: List[Dict[str, Any]] = []
+
+        header_rows = self._find_header_rows(df)
+        if not header_rows:
+            logger.warning("Compromisos: no se encontraron filas de encabezado.")
+            return compromisos
+
+        nrows = len(df)
+
+        for idx, h in enumerate(header_rows):
+            colmap = self._build_colmap(df, h)
+            categoria = self._find_categoria_for_header(df, h)
+
+            item_col = colmap["item"]
+            desc_col = colmap["descripcion"]
+            ft_col = colmap["fecha_toma"]
+            fcp_col = colmap["fecha_cierre_proyectada"]
+            fce_col = colmap["fecha_cierre_efectiva"]
+            resp_col = colmap["responsable"]
+            stat_col = colmap["status"]
+            obs_col = colmap["observacion"]
+
+            if item_col is None or desc_col is None:
+                logger.warning(
+                    "Compromisos: header_row=%s sin columnas mínimas (item/descripcion).",
+                    h,
+                )
+                continue
+
+            # rango de filas de este bloque (hasta el próximo header o fin de hoja)
+            if idx + 1 < len(header_rows):
+                end_row = header_rows[idx + 1]
+            else:
+                end_row = nrows
+
+            for r in range(h + 1, end_row):
+                row = df.iloc[r]
+
+                # Saltar si parece otra fila de encabezado (por seguridad)
+                if any(
+                    isinstance(v, str) and "item" in _norm(v)
+                    for v in row
+                ):
+                    continue
+
+                # valores básicos
+                item_val = row[item_col] if item_col < len(row) else None
+                desc_val = row[desc_col] if desc_col < len(row) else None
+
+                # Filas totalmente vacías
+                if (
+                    (item_val is None or (isinstance(item_val, float) and np.isnan(item_val)))
+                    and (desc_val is None or (isinstance(desc_val, float) and np.isnan(desc_val)))
+                ):
+                    continue
+
+                # Filas de título sin descripción (ej: "CONSTRUCCIÓN ..." sin datos)
+                if isinstance(item_val, str) and not item_val.strip().isdigit() and (
+                    desc_val is None or (isinstance(desc_val, float) and np.isnan(desc_val))
+                ):
+                    continue
+
+                # item debe ser algo numérico o un string de dígitos
+                if isinstance(item_val, (int, float)) and not pd.isna(item_val):
+                    item_num = int(item_val)
+                elif isinstance(item_val, str) and item_val.strip().isdigit():
+                    item_num = int(item_val.strip())
+                else:
+                    # No parece una fila de datos real
+                    continue
+
+                # descripción obligatoria
+                if not isinstance(desc_val, str) or not desc_val.strip():
+                    continue
+
+                def get(col_idx: Optional[int]) -> Any:
+                    if col_idx is None:
+                        return None
+                    if col_idx >= len(row):
+                        return None
+                    v = row[col_idx]
+                    if pd.isna(v):
+                        return None
+                    return v
+
+                fecha_toma = _parse_date_cell(get(ft_col))
+                fecha_cierre_proj = _parse_date_cell(get(fcp_col))
+                fecha_cierre_efec = _parse_date_cell(get(fce_col))
+                responsable = get(resp_col)
+                status = get(stat_col)
+                observacion = get(obs_col)
+
+                resp_s = None if responsable is None else str(responsable).strip()
+                stat_s = None if status is None else str(status).strip()
+                obs_s = None if observacion is None else str(observacion).strip()
+
+                compromisos.append(
+                    {
+                        "categoria": categoria,
+                        "item": item_num,
+                        "descripcion": str(desc_val).strip(),
+                        "fecha_toma": fecha_toma.isoformat() if fecha_toma else None,
+                        "fecha_cierre_proyectada": fecha_cierre_proj.isoformat() if fecha_cierre_proj else None,
+                        "fecha_cierre_efectiva": fecha_cierre_efec.isoformat() if fecha_cierre_efec else None,
+                        "responsable": resp_s,
+                        "status": stat_s,
+                        "observacion": obs_s,
+                    }
+                )
+
+        logger.debug("Compromisos: total_compromisos=%s", len(compromisos))
+        return compromisos
+
+    def _build_summary(self, compromisos: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Construye métricas:
+        - cantidad total
+        - cantidad por estado
+        - cantidad por categoría
+        - resumen por empresa (para tabla compromiso_resumen)
+        """
+        from collections import Counter
+
+        n = len(compromisos)
+        por_estado: Counter[str] = Counter()
+        por_categoria: Counter[str] = Counter()
+
+        # resumen por empresa: empresa -> {numero_compromiso, abierto, cerrado}
+        por_empresa: Dict[str, Dict[str, int]] = {}
+
+        for c in compromisos:
+            estado_raw = c.get("status") or ""
+            categoria_raw = c.get("categoria") or ""
+            empresa_raw = c.get("responsable") or ""
+
+            estado_norm = _norm(estado_raw)
+            categoria = categoria_raw or ""
+            empresa = empresa_raw.strip()
+
+            por_estado[estado_raw or ""] += 1
+            por_categoria[categoria] += 1
+
+            e = por_empresa.setdefault(
+                empresa,
+                {"numero_compromiso": 0, "abierto": 0, "cerrado": 0},
+            )
+            e["numero_compromiso"] += 1
+
+            is_cerrado = estado_norm.startswith("cerrad")
+            is_abierto = estado_norm.startswith("abiert")
+
+            if is_cerrado:
+                e["cerrado"] += 1
+            elif is_abierto or estado_norm:  # INF/Informativo los contamos como abiertos
+                e["abierto"] += 1
+            # si estado_norm == "" lo dejamos en ninguno
 
         summary = {
-            "header_row": header_row,
-            "columns_found": {k: v for k, v in colmap.items() if v is not None},
-            "counts": {
-                "total_filas": len(flat_rows),
-                "status": status_counts,
-                "by_categoria": cat_counts,
-            },
-            "samples": {
-                "unified": unified_rows[:2],
-                "flat": flat_rows[:2],
-            },
-            "input_meta": meta,
+            "n_compromisos": n,
+            "por_estado": dict(por_estado),
+            "por_categoria": dict(por_categoria),
+            "por_empresa": por_empresa,
         }
-
-        out = {
-            "sheet": self.sheet_key,
-            "rows": len(flat_rows),
-            "dry_run": dry_run,
-            "summary": summary,
-            "flat_rows": flat_rows,
-            "unified": unified_rows,
-            "by_tag": {
-                "compromisos": unified_rows,
-                "compromisos_abiertos": [u for u in unified_rows if (u["compromiso"].get("status") == "Abierto")],
-                "compromisos_cerrados": [u for u in unified_rows if (u["compromiso"].get("status") == "Cerrado")],
-            },
-            "blocks": {
-                "compromisos": flat_rows,
-                "by_status": {
-                    "Abierto": [f for f in flat_rows if f.get("status") == "Abierto"],
-                    "Cerrado": [f for f in flat_rows if f.get("status") == "Cerrado"],
-                },
-                "by_categoria": {
-                    k: [f for f in flat_rows if (f.get("categoria") or "(sin categoria)") == k]
-                    for k in sorted(set((f.get("categoria") or "(sin categoria)") for f in flat_rows))
-                },
-            },
-        }
-        return out
-
-    # ----------------------------- detección header -----------------------------
-    def _find_header_and_columns(self, df: pd.DataFrame) -> Tuple[Optional[int], Dict[str, Optional[int]]]:
-        """
-        Busca la fila de encabezado y mapea columnas clave.
-        Requiere al menos: item, descripcion, status.
-        """
-        nrows = min(len(df), 35)
-        ncols = min(df.shape[1], 32)
-
-        best_row: Optional[int] = None
-        best_map: Dict[str, Optional[int]] = {}
-        best_score = -1
-
-        for r in range(nrows):
-            row_vals = [str(df.iat[r, c]) if c < ncols else "" for c in range(ncols)]
-            colmap: Dict[str, Optional[int]] = {k: None for k in HEADER_PATS.keys()}
-
-            for c, raw in enumerate(row_vals):
-                s = raw
-                s_norm = _norm(raw)
-                for k, pat in HEADER_PATS.items():
-                    if colmap[k] is None and (pat.search(s) or pat.search(s_norm)):
-                        colmap[k] = c
-
-            # exigir mínimos
-            if not all(colmap.get(k) is not None for k in REQUIRED_FOR_HEADER):
-                continue
-
-            score = sum(1 for v in colmap.values() if v is not None)
-            if score > best_score:
-                best_score = score
-                best_row = r
-                best_map = colmap
-
-        if best_row is None:
-            return None, {}
-        logger.debug("Compromisos header at row %s | colmap=%s", best_row, best_map)
-        return best_row, best_map
-
-    # ----------------------------- parseo de filas -----------------------------
-    def _parse_rows(self, df: pd.DataFrame, header_row: int, colmap: Dict[str, Optional[int]], meta: dict) -> List[Dict[str, Any]]:
-        """
-        Itera filas posteriores al header. Soporta:
-         - Títulos de sección (solo texto en 'Item' y vacío en el resto).
-         - Re-encabezados internos (otra fila que repite 'Ítem', 'Descripción', etc.).
-         - Bloque lateral 'ESTATUS DE COMPROMISOS' → se ignora.
-        """
-        start = header_row + 1
-        nrows = len(df)
-        consecutive_blank = 0
-
-        rows: List[Dict[str, Any]] = []
-        categoria_actual: Optional[str] = None
-
-        def is_reheader(row: pd.Series) -> bool:
-            txts = [_norm(v) for v in row.values if not _is_na_like(v)]
-            return any(t == "item" for t in txts) and any("descripcion" in t for t in txts)
-
-        for r in range(start, nrows):
-            row = df.iloc[r, :]
-
-            if _is_blank_row(row):
-                consecutive_blank += 1
-                if consecutive_blank >= 3:
-                    break
-                continue
-            consecutive_blank = 0
-
-            # ignorar el panel de estatus si aparece en esta fila
-            joined_norm = _norm(" ".join(str(v) for v in row.values if not _is_na_like(v)))
-            if "estatus de compromisos" in joined_norm:
-                continue
-
-            # re-encabezado
-            if is_reheader(row):
-                logger.debug("Compromisos: re-encabezado detectado en fila %s", r)
-                continue
-
-            # ¿título de sección? → hay texto en Item, resto vacío (desc/status/resp)
-            c_item = colmap.get("item")
-            c_desc = colmap.get("descripcion")
-            c_status = colmap.get("status")
-
-            maybe_title = _safe_str(df, r, c_item)
-            has_desc = _safe_str(df, r, c_desc)
-            has_status = _safe_str(df, r, c_status)
-            has_resp = _safe_str(df, r, colmap.get("responsable"))
-
-            if maybe_title and not (has_desc or has_status or has_resp):
-                categoria_actual = maybe_title.strip()
-                continue
-
-            # fila de dato real
-            item = _safe_int(df, r, c_item)
-            desc = _safe_str(df, r, c_desc)
-            status_raw = _safe_str(df, r, c_status)
-            status = None
-            if status_raw:
-                t = _norm(status_raw)
-                if "abiert" in t:
-                    status = "Abierto"
-                elif "cerrad" in t:
-                    status = "Cerrado"
-                else:
-                    status = status_raw.strip()
-
-            # si no hay desc ni status, saltar
-            if (desc is None or desc == "") and status is None:
-                continue
-
-            fecha_toma = _parse_date_cell(_safe_str(df, r, colmap.get("fecha_toma")))
-            fecha_cierre_p = _parse_date_cell(_safe_str(df, r, colmap.get("fecha_cierre_proyectada")))
-            fecha_cierre_e = _parse_date_cell(_safe_str(df, r, colmap.get("fecha_cierre_efectiva")))
-            responsable = _safe_str(df, r, colmap.get("responsable"))
-            observacion = _safe_str(df, r, colmap.get("observacion"))
-
-            rows.append({
-                "excel_row_index": r,
-                "item": item,
-                "descripcion": desc,
-                "fecha_toma": fecha_toma,
-                "fecha_cierre_proyectada": fecha_cierre_p,
-                "fecha_cierre_efectiva": fecha_cierre_e,
-                "responsable": responsable,
-                "status": status,
-                "observacion": observacion,
-                "categoria": categoria_actual,
-            })
-
-        return rows
-
-    # ------------------------------- IO del reader -------------------------------
-    def _get_df_and_meta(self, reader) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-        """
-        Obtiene el DataFrame de 'compromisos' desde tu ExcelReader, siguiendo el
-        mismo flujo que ya está funcionando para otras hojas.
-        """
-        df = None
-        raw_name = None
-
-        # 1) cache completo por clave normalizada
-        if hasattr(reader, "read_all_sheets_keyed"):
-            try:
-                keyed = reader.read_all_sheets_keyed()
-                if isinstance(keyed, dict) and self.sheet_key in keyed:
-                    df = keyed[self.sheet_key]
-                    if hasattr(reader, "normalized_sheet_map"):
-                        try:
-                            mapping = reader.normalized_sheet_map()
-                            raw_name = mapping.get(self.sheet_key)
-                        except Exception:
-                            raw_name = None
-            except Exception:
-                pass
-
-        # 2) métodos directos por clave normalizada
-        if df is None:
-            for meth in ("get_detected_df", "get_df_by_key", "get_df"):
-                if hasattr(reader, meth):
-                    try:
-                        got = getattr(reader, meth)(self.sheet_key)
-                        if isinstance(got, tuple) and isinstance(got[0], pd.DataFrame):
-                            df = got[0]
-                            break
-                        if isinstance(got, pd.DataFrame):
-                            df = got
-                            break
-                    except Exception:
-                        continue
-
-        # 3) mapping normalizado → crudo y leer por nombre de hoja
-        if df is None and hasattr(reader, "normalized_sheet_map") and hasattr(reader, "get_sheet_df"):
-            try:
-                mapping = reader.normalized_sheet_map()
-                raw = mapping.get(self.sheet_key)
-                if raw:
-                    try:
-                        df = reader.get_sheet_df(raw, header=None)
-                        raw_name = raw
-                    except TypeError:
-                        df = reader.get_sheet_df(raw)
-                        raw_name = raw
-            except Exception:
-                pass
-
-        if df is None or not isinstance(df, pd.DataFrame):
-            raise ValueError("No se pudo leer la hoja 'compromisos' desde el reader.")
-
-        meta: Dict[str, Any] = {
-            "raw_sheet_name": raw_name,
-            "file_name": getattr(reader, "file_name", None) or getattr(reader, "filename", None) or self._meta_get(reader, "file_name"),
-            "file_hash": getattr(reader, "file_hash", None) or self._meta_get(reader, "file_hash"),
-            "source_path": getattr(reader, "source_path", None) or getattr(reader, "path", None) or self._meta_get(reader, "source_path"),
-            "nro_pod": self._meta_get(reader, "nro_pod"),
-            "fecha": self._meta_get(reader, "fecha"),
-        }
-        return df, meta
-
-    @staticmethod
-    def _meta_get(reader, key: str) -> Any:
-        for attr in ("meta", "metadata", "_meta"):
-            if hasattr(reader, attr):
-                obj = getattr(reader, attr)
-                if isinstance(obj, dict) and key in obj:
-                    return obj.get(key)
-        return None
+        return summary

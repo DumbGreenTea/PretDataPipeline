@@ -1,397 +1,289 @@
 # pretdb/etl/transformers/sso_transformer.py
 from __future__ import annotations
-import math
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
+import logging
+from datetime import datetime, date
 
 import pandas as pd
 from openpyxl import load_workbook
 
-# ========================= COLORES ============================================
+logger = logging.getLogger(__name__)
 
-HEX_ALIASES = {
-    "#00B050": "verde", "#92D050": "verde",
-    "#FFFF00": "amarillo", "#FFC000": "amarillo",
-    "#FF0000": "rojo",   "#C00000": "rojo",
+# ----------------------------- configuración -----------------------------
+
+MESES: Dict[str, int] = {
+    "ENERO": 1,
+    "FEBRERO": 2,
+    "MARZO": 3,
+    "ABRIL": 4,
+    "MAYO": 5,
+    "JUNIO": 6,
+    "JULIO": 7,
+    "AGOSTO": 8,
+    "SEPTIEMBRE": 9,
+    "OCTUBRE": 10,
+    "NOVIEMBRE": 11,
+    "DICIEMBRE": 12,
 }
-HEX_ALIASES = {k.upper(): v for k, v in HEX_ALIASES.items()}
-COLOR_CODE = {"verde": 1, "amarillo": 2, "rojo": 3}
-NEGROS_NUMERO = {"#000000", "#000", "BLACK"}
 
-# ========================= UTILS ==============================================
+# ⚠️ AJUSTA estos colores según los que tenga tu archivo real.
+# Los de ejemplo suelen ser:
+#   - verde:   FF00B050
+#   - amarillo:FFFFFF00
+#   - rojo:    FFFF0000
+COLOR_A_ESTADO: Dict[str, int] = {
+    "FF00B050": 0,  # verde   -> día sin accidente
+    "FFFFFF00": 1,  # amarillo -> accidente sin tiempo perdido
+    "FFFF0000": 2,  # rojo    -> accidente con tiempo perdido
+}
 
-def _norm_txt(x: str) -> str:
-    return x.replace("\n", " ").replace("\r", " ").strip()
+# ------------------------------ utilidades ------------------------------
 
-def _to_int_or_none(v) -> Optional[int]:
+
+def _get_cell_color_hex(cell) -> Optional[str]:
+    """
+    Devuelve el color de relleno de una celda como ARGB (ej: 'FF00B050')
+    o None si no hay color útil.
+    Maneja distintos tipos que usa openpyxl para colores.
+    """
+    fill = getattr(cell, "fill", None)
+    if fill is None:
+        return None
+
+    color = getattr(fill, "fgColor", None)
+    if color is None:
+        return None
+
+    # openpyxl puede devolver .rgb como str, o como objeto RGB
+    raw = getattr(color, "rgb", None)
+    if raw is None:
+        return None
+
+    # Si ya es string
+    if isinstance(raw, str):
+        return raw.upper()
+
+    # Si es otro tipo (p.ej. RGB), lo convertimos a str
     try:
-        if v is None or (isinstance(v, float) and math.isnan(v)):
-            return None
-        if isinstance(v, str):
-            s = v.strip()
-            if not s:
-                return None
-            # acepta "17", "17.0"
-            if s.replace(".", "", 1).isdigit():
-                return int(float(s))
-            return None
-        return int(v)
+        return str(raw).upper()
     except Exception:
+        logger.debug("SSOTransformer: color.rgb raro=%r en celda %s", raw, cell.coordinate)
         return None
 
-def _hex_from_fill(fill) -> Optional[str]:
-    if not fill:
-        return None
-    for attr in ("start_color", "fgColor"):
-        obj = getattr(fill, attr, None)
-        if obj is None:
-            continue
-        rgb = getattr(obj, "rgb", None)
-        if not rgb:
-            continue
-        s = str(rgb).upper()
-        if len(s) == 8:       # ARGB
-            return f"#{s[2:]}"
-        if len(s) == 6:       # RGB
-            return f"#{s}"
-    return None
 
-def _sheet_colors_df(xlsx_path: str, sheet_name: str, shape: Tuple[int, int]) -> pd.DataFrame:
-    wb = load_workbook(xlsx_path, data_only=True)
-    ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb[wb.sheetnames[0]]
-    rows, cols = shape
-    out = [[None for _ in range(cols)] for _ in range(rows)]
-    for r in range(1, rows + 1):
-        for c in range(1, cols + 1):
-            out[r-1][c-1] = _hex_from_fill(ws.cell(row=r, column=c).fill)
-    return pd.DataFrame(out)
+def _obtener_mes_y_anio(ws, df: pd.DataFrame) -> Tuple[int, int]:
+    """
+    Detecta el mes desde la parte superior de la hoja y el año desde alguna
+    celda con fecha del DataFrame (ej: reflexión del día).
+    """
+    mes_num: Optional[int] = None
 
-def _map_hex_to_label(hexv: Optional[str]) -> Optional[str]:
-    if not hexv:
-        return None
-    hv = hexv.upper()
-    if hv in NEGROS_NUMERO:
-        return "negro"
-    return HEX_ALIASES.get(hv)
+    # Buscar nombre del mes en las primeras filas
+    for row in ws.iter_rows(min_row=1, max_row=15, values_only=True):
+        for value in row:
+            if isinstance(value, str):
+                texto = value.strip().upper()
+                if texto in MESES:
+                    mes_num = MESES[texto]
+                    break
+        if mes_num is not None:
+            break
 
-def _severity_pick(labels: List[str]) -> Optional[str]:
-    best, score = None, -1
-    for lb in labels:
-        sc = COLOR_CODE.get(lb, -1)
-        if sc > score:
-            best, score = lb, sc
-    return best
+    if mes_num is None:
+        raise ValueError("SSO: no se pudo detectar el mes en la hoja.")
 
-# ========================= CRUZ DE SEGURIDAD ==================================
+    # Buscar año en cualquier celda que sea fecha
+    anio: Optional[int] = None
+    for val in df.to_numpy().ravel():
+        if isinstance(val, (pd.Timestamp, datetime, date)):
+            anio = pd.to_datetime(val).year
+            break
 
-@dataclass
-class CrossDay:
-    dia_mes: int
-    fecha: Optional[pd.Timestamp]
-    color_label: Optional[str]
-    color_hex: Optional[str]
-    estado_codigo: Optional[int]
-    row_top: int
-    col_right: int
+    if anio is None:
+        anio = date.today().year
 
-def _infer_month_ref_from_df(df: pd.DataFrame) -> Optional[pd.Timestamp]:
-    for r in range(df.shape[0]):
-        for c in range(df.shape[1]):
-            dt = pd.to_datetime(df.iat[r, c], dayfirst=True, errors="coerce")
-            if pd.notna(dt):
-                return dt
-    return None
+    return mes_num, anio
 
-def _extract_cross_days(df_vals: pd.DataFrame, df_colors: pd.DataFrame,
-                        month_ref: Optional[pd.Timestamp]) -> List[CrossDay]:
-    rows, cols = df_vals.shape
-    candidates: List[CrossDay] = []
 
-    for r in range(rows):
-        for c in range(cols):
-            dia = _to_int_or_none(df_vals.iat[r, c])
-            if dia is None or dia < 1 or dia > 31:
-                continue
+def _extraer_dias_cruz(ws) -> List[Dict[str, Any]]:
+    """
+    Recorre toda la hoja buscando celdas con valores 1..31 (días)
+    y devuelve lista con info de cada celda (día, fila, columna, color, estado).
+    """
+    dias: List[Dict[str, Any]] = []
 
-            neigh = []
-            for (rr, cc) in [(r, c-1), (r+1, c-1), (r+1, c)]:
-                if 0 <= rr < rows and 0 <= cc < cols:
-                    neigh.append((rr, cc))
-
-            labels, label_hex = [], []
-            for (rr, cc) in neigh:
-                hx = df_colors.iat[rr, cc]
-                lb = _map_hex_to_label(hx)
-                if lb and lb != "negro":
-                    labels.append(lb)
-                    label_hex.append((lb, hx))
-
-            final_label = _severity_pick(labels)
-            final_hex = None
-            if final_label:
-                for (lb, hx) in label_hex:
-                    if lb == final_label:
-                        final_hex = hx
-                        break
-
-            fecha = None
-            if isinstance(month_ref, pd.Timestamp):
-                try:
-                    fecha = pd.Timestamp(month_ref.year, month_ref.month, dia)
-                except Exception:
-                    fecha = None
-
-            candidates.append(
-                CrossDay(
-                    dia_mes=dia, fecha=fecha,
-                    color_label=final_label, color_hex=final_hex,
-                    estado_codigo=COLOR_CODE.get(final_label),
-                    row_top=r, col_right=c
+    for row in ws.iter_rows():
+        for cell in row:
+            v = cell.value
+            if isinstance(v, (int, float)) and 1 <= int(v) <= 31:
+                dia = int(v)
+                color_hex = _get_cell_color_hex(cell)
+                estado = COLOR_A_ESTADO.get(color_hex)
+                dias.append(
+                    {
+                        "dia": dia,
+                        "fila": cell.row,
+                        "columna": cell.column,
+                        "color": color_hex,
+                        "estado": estado,
+                    }
                 )
-            )
 
-    # Dedupe por día con prioridad rojo>amarillo>verde
-    unique: Dict[int, CrossDay] = {}
-    for cd in candidates:
-        prev = unique.get(cd.dia_mes)
-        if prev is None:
-            unique[cd.dia_mes] = cd
-        else:
-            prev_sc = prev.estado_codigo or -1
-            cur_sc  = cd.estado_codigo or -1
-            if cur_sc > prev_sc:
-                unique[cd.dia_mes] = cd
+    return dias
 
-    return list(sorted(unique.values(), key=lambda x: x.dia_mes))
 
-# ========================= EVENTOS / REFLEXIÓN ================================
+def _buscar_valor_por_etiqueta(df: pd.DataFrame, etiqueta: str) -> Optional[float]:
+    """
+    Busca una fila que contenga 'etiqueta' en alguna celda string
+    y devuelve el primer número que aparezca en esa fila.
+    Sirve para Hallazgos, Tarjeta Verde, Policlinico.
+    """
+    mask = df.applymap(
+        lambda x: isinstance(x, str) and etiqueta.lower() in x.lower()
+    )
+    coords = list(zip(*mask.to_numpy().nonzero()))
+    if not coords:
+        return None
 
-def _extract_events(df: pd.DataFrame) -> List[Dict]:
-    df_norm = df.apply(lambda col: col.map(lambda x: _norm_txt(x) if isinstance(x, str) else x))
-    header_row = None
-    for r in range(df_norm.shape[0]):
-        row_vals = [str(v).lower() for v in df_norm.iloc[r].tolist()]
-        joined = " | ".join(row_vals)
-        if (("descripción" in joined) or ("descripcion" in joined)) and ("fecha" in joined):
-            header_row = r
-            break
-    if header_row is None:
-        return []
+    fila_idx, _ = coords[0]
+    fila = df.loc[fila_idx]
 
-    header = [str(v).lower() if isinstance(v, str) else "" for v in df_norm.iloc[header_row].tolist()]
-    idx = {}
-    for i, name in enumerate(header):
-        if "descripción" in name or "descripcion" in name:
-            idx["descripcion"] = i
-        elif "clasific" in name:
-            idx["clasificacion"] = i
-        elif "fecha compromiso" in name or ("compromiso" in name and "fecha" in name):
-            idx["fecha_compromiso"] = i
-        elif name.strip() == "fecha" or name.startswith("fecha"):
-            idx["fecha"] = i
-        elif "estado" in name:
-            idx["estado"] = i
+    nums = fila[fila.apply(lambda x: isinstance(x, (int, float)))]
+    if nums.empty:
+        return None
+    return float(nums.iloc[0])
 
-    out = []
-    r = header_row + 1
-    while r < df.shape[0]:
-        row = df.iloc[r]
-        if row.isna().all():
-            break
 
-        def pick(key):
-            j = idx.get(key);  return None if j is None else row.iloc[j]
+def debug_colores_dias(path_excel: str, sheet_name: Optional[str] = None) -> None:
+    """
+    Helper opcional para probar desde consola:
+    imprime los colores distintos usados en celdas de días (1..31).
+    """
+    wb = load_workbook(path_excel, data_only=True)
+    ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
 
-        fecha = pd.to_datetime(pick("fecha"), dayfirst=True, errors="coerce") if pick("fecha") is not None else None
-        fecha_comp = pd.to_datetime(pick("fecha_compromiso"), dayfirst=True, errors="coerce") if pick("fecha_compromiso") is not None else None
+    vistos = set()
+    for row in ws.iter_rows():
+        for cell in row:
+            v = cell.value
+            if isinstance(v, (int, float)) and 1 <= int(v) <= 31:
+                color_hex = _get_cell_color_hex(cell)
+                if color_hex not in vistos:
+                    vistos.add(color_hex)
+                    print(f"Celda {cell.coordinate}: día={int(v)}, color={color_hex}")
 
-        ev = {
-            "fecha": fecha,
-            "descripcion": pick("descripcion"),
-            "clasificacion": pick("clasificacion"),
-            "fecha_compromiso": fecha_comp,
-            "estado": pick("estado"),
-        }
-        if any(v not in (None, "") for v in ev.values()):
-            out.append(ev)
-        r += 1
-    return out
+    if not vistos:
+        print("SSO: no se encontraron colores en días 1..31.")
 
-def _extract_reflexion(df: pd.DataFrame) -> List[Dict]:
-    df_str = df.apply(lambda col: col.map(lambda x: x if isinstance(x, str) else None))
-    rows, cols = df_str.shape
-    head = None
-    for r in range(rows):
-        for c in range(cols):
-            v = df_str.iat[r, c]
-            if v and "reflex" in v.lower():
-                head = r; break
-        if head is not None:
-            break
-    if head is None:
-        return []
 
-    fecha = None
-    for r in range(head, min(head + 5, rows)):
-        for c in range(cols):
-            dt = pd.to_datetime(df_str.iat[r, c], dayfirst=True, errors="coerce")
-            if pd.notna(dt):
-                fecha = dt; break
-        if fecha is not None:
-            break
-
-    textos = []
-    for r in range(head + 1, min(head + 12, rows)):
-        row_vals = [x for x in df_str.iloc[r].tolist() if isinstance(x, str)]
-        line = " ".join(s.strip() for s in row_vals if s and s.strip())
-        if line:
-            textos.append(line)
-    body = "\n".join(textos).strip() or None
-    if not body:
-        return []
-    return [{"fecha": fecha, "descripcion": body}]
-
-# ========================= TRANSFORMER ========================================
+# ----------------------------- clase principal -----------------------------
 
 class SSOTransformer:
     """
-    Orquestador:
-        tr = SSOTransformer()
-        payload = tr.transform(df_sso, ctx={"excel_path": path, "raw_sheet_name": "3.SSO", "month_ref": None})
-    También puedes usar: tr.run(df, excel_path=..., raw_sheet_name=..., month_ref=None)
+    Transformer para la hoja SSO (Cruz de Seguridad + Hallazgos/Tarjeta/Policlínico).
+
+    API compatible con el orquestador:
+        run_df(self, df_raw, meta, dry_run=False, **kwargs) -> dict
     """
-    sheet = "sso"
 
-    def __init__(self):
-        pass  # sin argumentos para que el registry pueda instanciar
+    sheet_key = "sso"
 
-    # Alias cómodo si tu orquestador usa 'run'
-    def run(self, df_sso: pd.DataFrame, *, excel_path: Optional[str] = None,
-            raw_sheet_name: Optional[str] = None, month_ref: Optional[pd.Timestamp] = None) -> Dict:
-        return self.transform(df_sso, excel_path=excel_path, raw_sheet_name=raw_sheet_name, month_ref=month_ref)
+    def run_df(
+        self,
+        df_raw: pd.DataFrame,
+        meta: Dict[str, Any],
+        dry_run: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        logger.debug("SSOTransformer.run_df: shape=%s", df_raw.shape)
 
-    def transform(self, df: pd.DataFrame, ctx: Optional[dict] = None, **kwargs) -> Dict:
-        # ---------- Contexto ----------
-        ctx = ctx or {}
-        excel_path: Optional[str] = kwargs.get("excel_path", ctx.get("excel_path"))
-        raw_sheet_name: Optional[str] = kwargs.get("raw_sheet_name", ctx.get("raw_sheet_name"))
-        month_ref: Optional[pd.Timestamp] = kwargs.get("month_ref", ctx.get("month_ref"))
+        df = df_raw.copy()
 
-        # Normaliza strings (sin applymap deprecado)
-        df_norm = df.apply(lambda col: col.map(lambda x: _norm_txt(x) if isinstance(x, str) else x))
+        # Intentamos obtener la ruta al archivo de varias fuentes:
+        # - kwargs["file_path"]  (por si algún día se lo pasas directo)
+        # - meta["source_path"]  (lo que arma el orchestrator que me mostraste)
+        # - meta["file_path"]    (por compatibilidad con versiones anteriores)
+        file_path = (
+            kwargs.get("file_path")
+            or meta.get("source_path")
+            or meta.get("file_path")
+        )
 
-        # Mes de referencia
-        month_ref = month_ref or _infer_month_ref_from_df(df_norm)
+        if not file_path:
+            logger.error(
+                "SSOTransformer: meta sin file_path/source_path. Meta recibido: %r",
+                meta,
+            )
+            raise ValueError(
+                "SSOTransformer necesita 'file_path' o 'source_path' en meta/kwargs "
+                "para poder leer los colores de la cruz de seguridad."
+            )
 
-        # Colores hoja (si no tenemos excel_path/sheet, devolvemos cruz vacía)
-        cross_days: List[CrossDay] = []
-        if excel_path and raw_sheet_name:
-            df_colors = _sheet_colors_df(excel_path, raw_sheet_name, df.shape)
-            cross_days = _extract_cross_days(df, df_colors, month_ref)
+        # Nombre de hoja original
+        sheet_name = (
+            kwargs.get("sheet_name")
+            or meta.get("raw_sheet_name")
+            or meta.get("sheet_key")
+        )
 
-        # Eventos y Reflexión
-        events = _extract_events(df_norm)
-        reflexion = _extract_reflexion(df_norm)
+        wb = load_workbook(file_path, data_only=True)
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            logger.warning(
+                "SSOTransformer: sheet_name '%s' no encontrado en %s, usando wb.active",
+                sheet_name,
+                file_path,
+            )
+            ws = wb.active
 
-        # Resumen colores (post-dedupe)
-        by_color = {"verde": 0, "amarillo": 0, "rojo": 0}
-        for cd in cross_days:
-            if cd.color_label in by_color:
-                by_color[cd.color_label] += 1
+        # Mes y año de la hoja
+        mes, anio = _obtener_mes_y_anio(ws, df)
+
+        # Días de la cruz de seguridad
+        dias = _extraer_dias_cruz(ws)
+        logger.debug("SSOTransformer: dias_detectados=%s", len(dias))
+
+        if not dias:
+            raise ValueError("SSOTransformer: no se encontraron días (1..31) en la cruz.")
+
+        dias_con_estado = [d for d in dias if d["estado"] is not None]
+
+        if dias_con_estado:
+            # último por número de día
+            ultimo = max(dias_con_estado, key=lambda d: d["dia"])
+        else:
+            logger.warning(
+                "SSOTransformer: ningún día tiene color mapeado en COLOR_A_ESTADO; "
+                "usando último día solo por número."
+            )
+            ultimo = max(dias, key=lambda d: d["dia"])
+
+        fecha_ultimo = date(anio, mes, ultimo["dia"])
+
+        # Recuadros inferiores (Hallazgos, Tarjeta Verde, Policlinico)
+        hallazgos = _buscar_valor_por_etiqueta(df, "Hallazgos")
+        tarjeta_verde = _buscar_valor_por_etiqueta(df, "Tarjeta Verde")
+        policlinico = _buscar_valor_por_etiqueta(df, "Policlinico")
 
         summary = {
-            "rows_events": len(events),
-            "rows_reflexiones": len(reflexion),
-            "color_augmented": bool(excel_path and raw_sheet_name),
-            "cross_days_count": len(cross_days),
-            "by_color": by_color,
-            "sample_cross_days": [vars(x) for x in cross_days[:10]],
+            "mes": mes,
+            "anio": anio,
+            "ultimo_dia": ultimo["dia"],
+            "fecha_ultimo_dia": fecha_ultimo.isoformat(),
+            "estado_ultimo_dia": ultimo.get("estado"),
+            "color_hex_ultimo_dia": ultimo.get("color"),
+            "n_dias_detectados": len(dias),
+            "n_dias_con_estado": len(dias_con_estado),
+            "hallazgos": hallazgos,
+            "tarjeta_verde": tarjeta_verde,
+            "policlinico": policlinico,
         }
 
         return {
-            "sheet": self.sheet,
+            "sheet": self.sheet_key,
+            "rows": len(dias),
             "summary": summary,
-            "events": events,
-            "reflexion": reflexion,
-            "cross_days": [vars(x) for x in cross_days],
-            "meta": {"file_name": excel_path, "raw_sheet_name": raw_sheet_name},
+            "dias_detail": dias,
+            "dry_run": dry_run,
         }
-
-    # ------------------ Persistencia opcional ---------------------------------
-    def save(self, sso_obj, payload: Optional[Dict] = None, dry_run: bool = False) -> Dict:
-        if payload is None:
-            raise ValueError("Debes pasar el payload retornado por transform/run.")
-        if dry_run:
-            return {"cross": None, "eventos": {"created": 0, "updated": 0}, "reflexion": {"created": 0, "updated": 0}}
-
-        from django.db import transaction
-        from pretdb.models import SSO_cruz_seguridad, SSO_estado_dia, SSO_Evento, SSO_Reflexion
-
-        cross = payload.get("cross_days", [])
-        fechas = [row.get("fecha") for row in cross if row.get("fecha") is not None]
-        fecha_inicio = min(fechas) if fechas else None
-        fecha_fin = max(fechas) if fechas else None
-
-        res = {"cross": None, "eventos": {"created": 0, "updated": 0}, "reflexion": {"created": 0, "updated": 0}}
-        with transaction.atomic():
-            # Cruz
-            cruz, _ = SSO_cruz_seguridad.objects.get_or_create(
-                sso=sso_obj,
-                defaults={"fecha_inicio": fecha_inicio, "fecha_fin": fecha_fin},
-            )
-            changed = False
-            if fecha_inicio and cruz.fecha_inicio != fecha_inicio:
-                cruz.fecha_inicio = fecha_inicio; changed = True
-            if fecha_fin and cruz.fecha_fin != fecha_fin:
-                cruz.fecha_fin = fecha_fin; changed = True
-            if changed:
-                cruz.save(update_fields=["fecha_inicio", "fecha_fin"])
-
-            created = updated = 0
-            for row in cross:
-                obj, was_created = SSO_estado_dia.objects.update_or_create(
-                    sso_cruz_seguridad=cruz,
-                    dia_mes=int(row["dia_mes"]),
-                    defaults={
-                        "fecha": row.get("fecha"),
-                        "estado_dia": row.get("estado_codigo"),
-                        "color_label": row.get("color_label"),
-                        "color_hex": row.get("color_hex"),
-                    },
-                )
-                created += 1 if was_created else 0
-                updated += 0 if was_created else 1
-            res["cross"] = {"created": created, "updated": updated, "cruz_id": cruz.pk,
-                            "fecha_inicio": fecha_inicio, "fecha_fin": fecha_fin}
-
-            # Eventos
-            ev_c = ev_u = 0
-            for ev in payload.get("events", []):
-                obj, created_flag = SSO_Evento.objects.update_or_create(
-                    sso=sso_obj,
-                    fecha=ev.get("fecha"),
-                    descripcion_dia=ev.get("descripcion"),
-                    defaults={
-                        "clasificacion": ev.get("clasificacion"),
-                        "fecha_compromiso": ev.get("fecha_compromiso"),
-                        "estado": ev.get("estado"),
-                    },
-                )
-                ev_c += 1 if created_flag else 0
-                ev_u += 0 if created_flag else 1
-            res["eventos"] = {"created": ev_c, "updated": ev_u}
-
-            # Reflexión
-            rx_c = rx_u = 0
-            for rx in payload.get("reflexion", []):
-                obj, created_flag = SSO_Reflexion.objects.update_or_create(
-                    sso=sso_obj,
-                    fecha=rx.get("fecha"),
-                    hallazgo=rx.get("descripcion"),
-                    defaults={},
-                )
-                rx_c += 1 if created_flag else 0
-                rx_u += 0 if created_flag else 1
-            res["reflexion"] = {"created": rx_c, "updated": rx_u}
-
-        return res

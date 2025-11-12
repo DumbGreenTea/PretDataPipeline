@@ -1,0 +1,154 @@
+.
+├── backend
+│   ├── __pycache__
+│   │   ├── debug_color.cpython-312.pyc
+│   │   └── manage.cpython-312.pyc
+│   ├── config
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-311.pyc
+│   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── __init__.cpython-313.pyc
+│   │   │   ├── asgi.cpython-312.pyc
+│   │   │   ├── settings.cpython-311.pyc
+│   │   │   ├── settings.cpython-312.pyc
+│   │   │   ├── settings.cpython-313.pyc
+│   │   │   ├── urls.cpython-311.pyc
+│   │   │   ├── urls.cpython-312.pyc
+│   │   │   ├── urls.cpython-313.pyc
+│   │   │   ├── wsgi.cpython-311.pyc
+│   │   │   ├── wsgi.cpython-312.pyc
+│   │   │   └── wsgi.cpython-313.pyc
+│   │   ├── asgi.py
+│   │   ├── settings.py
+│   │   ├── urls.py
+│   │   └── wsgi.py
+│   ├── db.sqlite3
+│   ├── debug_color.py
+│   ├── dockerfile
+│   ├── entrypoint.sh
+│   ├── manage.py
+│   ├── pretdb
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-311.pyc
+│   │   │   ├── __init__.cpython-312.pyc
+│   │   │   ├── admin.cpython-311.pyc
+│   │   │   ├── admin.cpython-312.pyc
+│   │   │   ├── apps.cpython-311.pyc
+│   │   │   ├── apps.cpython-312.pyc
+│   │   │   ├── models.cpython-311.pyc
+│   │   │   ├── models.cpython-312.pyc
+│   │   │   ├── tests.cpython-312.pyc
+│   │   │   └── views.cpython-312.pyc
+│   │   ├── admin.py
+│   │   ├── apps.py
+│   │   ├── etl
+│   │   │   ├── loaders
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── __pycache__
+│   │   │   │   │   ├── __init__.cpython-312.pyc
+│   │   │   │   │   ├── asistencia_loader.cpython-312.pyc
+│   │   │   │   │   ├── compromiso_loader.cpython-312.pyc
+│   │   │   │   │   ├── maquinaria_loader.cpython-312.pyc
+│   │   │   │   │   ├── matriz_cnc_loader.cpython-312.pyc
+│   │   │   │   │   ├── plan_anterior_loader.cpython-312.pyc
+│   │   │   │   │   ├── plan_dia_loader.cpython-312.pyc
+│   │   │   │   │   ├── ppc_loader.cpython-312.pyc
+│   │   │   │   │   └── sso_loader.cpython-312.pyc
+│   │   │   │   ├── asistencia_loader.py
+│   │   │   │   ├── compromiso_loader.py
+│   │   │   │   ├── maquinaria_loader.py
+│   │   │   │   ├── matriz_cnc_loader.py
+│   │   │   │   ├── plan_anterior_loader.py
+│   │   │   │   ├── plan_dia_loader.py
+│   │   │   │   ├── portada_loader.py
+│   │   │   │   ├── ppc_loader.py
+│   │   │   │   └── sso_loader.py
+│   │   │   ├── processors
+│   │   │   │   ├── __pycache__
+│   │   │   │   │   └── orchestrator.cpython-312.pyc
+│   │   │   │   └── orchestrator.py
+│   │   │   ├── readers
+│   │   │   │   ├── __pycache__
+│   │   │   │   │   ├── color_df_viewer.cpython-312.pyc
+│   │   │   │   │   └── excel_reader.cpython-312.pyc
+│   │   │   │   ├── color_df_viewer.py
+│   │   │   │   └── excel_reader.py
+│   │   │   └── transformers
+│   │   │       ├── __pycache__
+│   │   │       │   ├── asistencia_transformer.cpython-312.pyc
+│   │   │       │   ├── compromiso_transformer.cpython-312.pyc
+│   │   │       │   ├── maquinaria_transformer.cpython-312.pyc
+│   │   │       │   ├── matriz_cnc_transformer.cpython-312.pyc
+│   │   │       │   ├── plan_anterior_transformer.cpython-312.pyc
+│   │   │       │   ├── plan_dia_transformer.cpython-312.pyc
+│   │   │       │   ├── portada_transformer.cpython-312.pyc
+│   │   │       │   ├── ppc_transformer.cpython-312.pyc
+│   │   │       │   ├── registry.cpython-312.pyc
+│   │   │       │   └── sso_transformer.cpython-312.pyc
+│   │   │       ├── asistencia_transformer.py
+│   │   │       ├── compromiso_transformer.py
+│   │   │       ├── maquinaria_transformer.py
+│   │   │       ├── matriz_cnc_transformer.py
+│   │   │       ├── plan_anterior_transformer.py
+│   │   │       ├── plan_dia_transformer.py
+│   │   │       ├── portada_transformer.py
+│   │   │       ├── ppc_transformer.py
+│   │   │       ├── registry.py
+│   │   │       └── sso_transformer.py
+│   │   ├── management
+│   │   │   └── commands
+│   │   │       ├── __pycache__
+│   │   │       │   ├── import_excel.cpython-312.pyc
+│   │   │       │   └── ingest_pod.cpython-312.pyc
+│   │   │       ├── import_excel.py
+│   │   │       └── ingest_pod.py
+│   │   ├── migrations
+│   │   │   ├── __init__.py
+│   │   │   ├── __pycache__
+│   │   │   │   ├── __init__.cpython-311.pyc
+│   │   │   │   ├── __init__.cpython-312.pyc
+│   │   │   │   ├── 0001_initial.cpython-311.pyc
+│   │   │   │   └── 0001_initial.cpython-312.pyc
+│   │   │   └── 0001_initial.py
+│   │   ├── models.py
+│   │   ├── tests.py
+│   │   └── views.py
+│   ├── requirements.txt
+│   └── sql
+│       ├── functions
+│       ├── migrations
+│       └── seeds
+├── docker-compose.yaml
+├── documents
+│   ├── arquitectura.md
+│   ├── decisiones_tecnicas.md
+│   └── endpoints.md
+├── estructura.txt
+├── frontend
+│   ├── app_web
+│   │   ├── eslint.config.mjs
+│   │   ├── next-env.d.ts
+│   │   ├── next.config.ts
+│   │   ├── package-lock.json
+│   │   ├── package.json
+│   │   ├── public
+│   │   │   ├── file.svg
+│   │   │   ├── globe.svg
+│   │   │   ├── next.svg
+│   │   │   ├── vercel.svg
+│   │   │   └── window.svg
+│   │   ├── README.md
+│   │   ├── src
+│   │   │   └── app
+│   │   │       ├── favicon.ico
+│   │   │       ├── globals.css
+│   │   │       ├── layout.tsx
+│   │   │       ├── page.module.css
+│   │   │       └── page.tsx
+│   │   └── tsconfig.json
+│   └── dockerfile
+└── README.md
+
+31 directories, 121 files

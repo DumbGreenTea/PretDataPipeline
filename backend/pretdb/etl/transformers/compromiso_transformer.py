@@ -1,9 +1,6 @@
-# pretdb/etl/transformers/compromiso_transformer.py
 from __future__ import annotations
 from typing import Dict, Any, List, Optional
-import logging
-import re
-import unicodedata
+import logging, re, unicodedata, hashlib
 from datetime import datetime, date
 
 import pandas as pd
@@ -17,7 +14,6 @@ def _norm(s: Any) -> str:
     """Quita acentos, pasa a minúsculas y colapsa espacios."""
     if s is None:
         return ""
-    # NaN de pandas
     if isinstance(s, float) and np.isnan(s):
         return ""
     s = str(s)
@@ -26,33 +22,59 @@ def _norm(s: Any) -> str:
     s = re.sub(r"\s+", " ", s)
     return s
 
-
 def _parse_date_cell(x: Any) -> Optional[date]:
-    """Convierte celdas a date (similar a AsistenciaTransformer)."""
+    """Convierte celdas a date (acepta ISO y día/mes primero)."""
     if isinstance(x, (pd.Timestamp, datetime)):
         return x.date()
     if isinstance(x, date):
         return x
-
     s = (str(x) if x is not None else "").strip()
-    if not s or s.lower() in ("na", "nan", "<na>"):
+    if not s or s.lower() in ("na", "nan", "<na>", "none"):
         return None
-
-    # intentar ISO primero
     if re.match(r"^\d{4}-\d{2}-\d{2}", s):
         dt = pd.to_datetime(s, errors="coerce", dayfirst=False)
     else:
         dt = pd.to_datetime(s, errors="coerce", dayfirst=True)
-
     return None if pd.isna(dt) else dt.date()
 
+def _status_canonical(raw: Optional[str]) -> str:
+    """
+    Normaliza estado → {'abierto','cerrado','informativo','desconocido'}.
+    'INF' o 'informativo' se tratan como informativo (en métricas lo contamos como abierto operativo).
+    """
+    t = _norm(raw)
+    if not t:
+        return "desconocido"
+    if t.startswith("cerrad"):
+        return "cerrado"
+    if t.startswith("abiert"):
+        return "abierto"
+    if t.startswith("inf"):  # INF, informativo
+        return "informativo"
+    return "desconocido"
+
+def _safe_str(row: pd.Series, idx: Optional[int]) -> Optional[str]:
+    if idx is None:
+        return None
+    if idx >= len(row):
+        return None
+    v = row[idx]
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return None
+    s = str(v).strip()
+    return s if s else None
+
+def _row_id(categoria: Optional[str], item: int, descripcion: str) -> str:
+    base = f"{categoria or ''}|{item}|{_norm(descripcion)}"
+    return hashlib.md5(base.encode("utf-8")).hexdigest()[:16]
 
 # ------------------------------ clase principal ------------------------------
 
 class CompromisosTransformer:
     """
-    Extrae compromisos desde la hoja 'Compromisos' en sus distintas variantes
-    (una única tabla o múltiples bloques por disciplina).
+    Extrae compromisos desde la hoja 'Compromisos' en sus variantes
+    (una tabla o múltiples bloques por disciplina).
+    Devuelve estructura estándar: flat_rows, unified, by_tag, blocks.
     """
     sheet_key = "compromisos"
 
@@ -66,48 +88,44 @@ class CompromisosTransformer:
         **kwargs,
     ) -> dict:
         logger.debug("CompromisosTransformer.run_df: shape=%s", df_raw.shape)
-
         df = df_raw.copy()
-        compromisos = self._extract_compromisos(df)
 
-        summary = self._build_summary(compromisos)
+        compromisos = self._extract_compromisos(df)  # lista plana dicts
+        flat_rows, unified_rows = self._to_flat_and_unified(compromisos)
+        summary = self._build_summary(flat_rows)
 
-        return {
+        out = {
             "sheet": self.sheet_key,
-            "rows": len(compromisos),
-            "summary": summary,
-            "compromisos_detail": compromisos,
+            "rows": len(flat_rows),
             "dry_run": dry_run,
+            "summary": summary,
+            "flat_rows": flat_rows,
+            "unified": unified_rows,
+            "horarios_inicio": [],
+            "by_tag": {"compromisos": flat_rows},
+            "blocks": {"compromisos": unified_rows},
         }
+        return out
 
     # --------------------------- helpers internos ---------------------------
 
     def _find_header_rows(self, df: pd.DataFrame) -> List[int]:
         """
-        Detecta filas de encabezado de tabla (las que contienen 'Ítem' / 'Item').
-        Limita búsqueda a las primeras ~80 filas.
+        Detecta filas de encabezado (contengan 'Ítem'/'Item' en alguna celda).
+        Limita búsqueda a primeras ~80 filas.
         """
         headers: List[int] = []
         max_rows = min(len(df), 80)
-
         for r in range(max_rows):
             row = df.iloc[r]
-            found_item = False
-            for val in row:
-                if isinstance(val, str) and "item" in _norm(val):
-                    found_item = True
-                    break
-            if found_item:
+            if any(isinstance(v, str) and "item" in _norm(v) for v in row):
                 headers.append(r)
-
         logger.debug("Compromisos: header_rows=%s", headers)
         return headers
 
     def _build_colmap(self, df: pd.DataFrame, header_row: int) -> Dict[str, Optional[int]]:
         """
-        A partir de una fila de encabezado, mapea nombre lógico -> índice de columna.
-        Soporta variantes donde la columna de descripción se llama 'Descripción' o
-        trae el nombre de la disciplina ('CONSTRUCCIÓN, LOGISTICA Y BODEGA', etc.).
+        Mapea nombre lógico -> índice de columna. Tolera variaciones.
         """
         row = df.iloc[header_row]
         ncols = df.shape[1]
@@ -125,10 +143,9 @@ class CompromisosTransformer:
             if not isinstance(val, str):
                 continue
             nv = _norm(val)
-
             if "item" in nv and item_col is None:
                 item_col = c
-            if "descripcion" in nv and desc_col is None:
+            if ("descripcion" in nv or "descripción" in nv or "descripcion del compromiso" in nv) and desc_col is None:
                 desc_col = c
             if "fecha toma" in nv and fecha_toma_col is None:
                 fecha_toma_col = c
@@ -143,7 +160,7 @@ class CompromisosTransformer:
             if "observacion" in nv and obs_col is None:
                 obs_col = c
 
-        # Fallback: descripción justo a la derecha de Ítem
+        # Fallback: descripción a la derecha de Ítem
         if desc_col is None and item_col is not None and item_col + 1 < ncols:
             desc_col = item_col + 1
 
@@ -157,41 +174,36 @@ class CompromisosTransformer:
             "status": status_col,
             "observacion": obs_col,
         }
-
         logger.debug("Compromisos: colmap(header_row=%s)=%s", header_row, colmap)
         return colmap
 
     def _find_categoria_for_header(self, df: pd.DataFrame, header_row: int) -> Optional[str]:
         """
-        Intenta detectar la categoría / disciplina asociada a un bloque de compromisos:
-        revisa 1–3 filas por encima en la primera columna.
+        Detecta categoría/disciplina del bloque mirando 1–3 filas hacia arriba
+        (preferentemente columna 0, pero si está vacía, escanea toda la fila).
         """
         for r in range(header_row - 1, max(-1, header_row - 4), -1):
             if r < 0:
                 break
-            v = df.iat[r, 0]
-            if not isinstance(v, str):
-                continue
-            nv = _norm(v)
-            if not nv:
-                continue
-            if nv.startswith("item"):
-                continue
-            if "compromisos pod" in nv:
-                continue
-            if "cc 006" in nv:
-                continue
-            # Parece un título de bloque ("HSE SEGURIDAD", "QA/QC", etc.)
-            return v.strip()
+            # preferir col 0
+            candidates = [df.iat[r, 0]]
+            # si col 0 vacío, mira el resto
+            if not isinstance(candidates[0], str) or not candidates[0].strip():
+                candidates = [v for v in df.iloc[r] if isinstance(v, str)]
+            for v in candidates:
+                nv = _norm(v)
+                if not nv:
+                    continue
+                if nv.startswith("item") or "compromisos pod" in nv or "cc 006" in nv:
+                    continue
+                return v.strip()
         return None
 
     def _extract_compromisos(self, df: pd.DataFrame) -> List[Dict[str, Any]]:
         """
-        Recorre todas las tablas detectadas en la hoja y arma una lista
-        plana de compromisos.
+        Recorre todas las tablas detectadas y arma lista plana de compromisos.
         """
         compromisos: List[Dict[str, Any]] = []
-
         header_rows = self._find_header_rows(df)
         if not header_rows:
             logger.warning("Compromisos: no se encontraron filas de encabezado.")
@@ -213,144 +225,194 @@ class CompromisosTransformer:
             obs_col = colmap["observacion"]
 
             if item_col is None or desc_col is None:
-                logger.warning(
-                    "Compromisos: header_row=%s sin columnas mínimas (item/descripcion).",
-                    h,
-                )
+                logger.warning("Compromisos: header_row=%s sin columnas mínimas (item/descripcion).", h)
                 continue
 
-            # rango de filas de este bloque (hasta el próximo header o fin de hoja)
-            if idx + 1 < len(header_rows):
-                end_row = header_rows[idx + 1]
-            else:
-                end_row = nrows
+            end_row = header_rows[idx + 1] if idx + 1 < len(header_rows) else nrows
 
             for r in range(h + 1, end_row):
                 row = df.iloc[r]
 
-                # Saltar si parece otra fila de encabezado (por seguridad)
-                if any(
-                    isinstance(v, str) and "item" in _norm(v)
-                    for v in row
-                ):
+                # Saltar filas que parecen nuevos headers
+                if any(isinstance(v, str) and "item" in _norm(v) for v in row):
                     continue
 
-                # valores básicos
                 item_val = row[item_col] if item_col < len(row) else None
                 desc_val = row[desc_col] if desc_col < len(row) else None
 
-                # Filas totalmente vacías
-                if (
-                    (item_val is None or (isinstance(item_val, float) and np.isnan(item_val)))
-                    and (desc_val is None or (isinstance(desc_val, float) and np.isnan(desc_val)))
-                ):
+                # Filas vacías
+                if ((item_val is None or (isinstance(item_val, float) and pd.isna(item_val)))
+                    and (desc_val is None or (isinstance(desc_val, float) and pd.isna(desc_val)))):
                     continue
 
-                # Filas de título sin descripción (ej: "CONSTRUCCIÓN ..." sin datos)
+                # Filas de título sin descripción (p.ej. un subtítulo intermedio)
                 if isinstance(item_val, str) and not item_val.strip().isdigit() and (
-                    desc_val is None or (isinstance(desc_val, float) and np.isnan(desc_val))
+                    desc_val is None or (isinstance(desc_val, float) and pd.isna(desc_val))
                 ):
                     continue
 
-                # item debe ser algo numérico o un string de dígitos
+                # Ítem debe ser entero o string de dígitos
                 if isinstance(item_val, (int, float)) and not pd.isna(item_val):
                     item_num = int(item_val)
                 elif isinstance(item_val, str) and item_val.strip().isdigit():
                     item_num = int(item_val.strip())
                 else:
-                    # No parece una fila de datos real
                     continue
 
-                # descripción obligatoria
+                # Descripción obligatoria
                 if not isinstance(desc_val, str) or not desc_val.strip():
                     continue
 
-                def get(col_idx: Optional[int]) -> Any:
-                    if col_idx is None:
-                        return None
-                    if col_idx >= len(row):
-                        return None
-                    v = row[col_idx]
-                    if pd.isna(v):
-                        return None
-                    return v
+                def get(col_idx: Optional[int]):
+                    return _safe_str(row, col_idx)
 
                 fecha_toma = _parse_date_cell(get(ft_col))
                 fecha_cierre_proj = _parse_date_cell(get(fcp_col))
                 fecha_cierre_efec = _parse_date_cell(get(fce_col))
                 responsable = get(resp_col)
-                status = get(stat_col)
+                status_raw = get(stat_col)
                 observacion = get(obs_col)
 
-                resp_s = None if responsable is None else str(responsable).strip()
-                stat_s = None if status is None else str(status).strip()
-                obs_s = None if observacion is None else str(observacion).strip()
+                estado = _status_canonical(status_raw)
 
                 compromisos.append(
                     {
                         "categoria": categoria,
                         "item": item_num,
                         "descripcion": str(desc_val).strip(),
-                        "fecha_toma": fecha_toma.isoformat() if fecha_toma else None,
-                        "fecha_cierre_proyectada": fecha_cierre_proj.isoformat() if fecha_cierre_proj else None,
-                        "fecha_cierre_efectiva": fecha_cierre_efec.isoformat() if fecha_cierre_efec else None,
-                        "responsable": resp_s,
-                        "status": stat_s,
-                        "observacion": obs_s,
+                        "fecha_toma": fecha_toma,
+                        "fecha_cierre_proyectada": fecha_cierre_proj,
+                        "fecha_cierre_efectiva": fecha_cierre_efec,
+                        "responsable": responsable,
+                        "status_raw": status_raw,
+                        "estado": estado,            # normalizado
+                        "observacion": observacion,
                     }
                 )
 
         logger.debug("Compromisos: total_compromisos=%s", len(compromisos))
         return compromisos
 
-    def _build_summary(self, compromisos: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        Construye métricas:
-        - cantidad total
-        - cantidad por estado
-        - cantidad por categoría
-        - resumen por empresa (para tabla compromiso_resumen)
-        """
-        from collections import Counter
-
-        n = len(compromisos)
-        por_estado: Counter[str] = Counter()
-        por_categoria: Counter[str] = Counter()
-
-        # resumen por empresa: empresa -> {numero_compromiso, abierto, cerrado}
-        por_empresa: Dict[str, Dict[str, int]] = {}
+    def _to_flat_and_unified(self, compromisos: List[Dict[str, Any]]):
+        """Construye flat_rows/unified con row_id estable."""
+        flat_rows: List[Dict[str, Any]] = []
+        unified_rows: List[Dict[str, Any]] = []
 
         for c in compromisos:
-            estado_raw = c.get("status") or ""
-            categoria_raw = c.get("categoria") or ""
-            empresa_raw = c.get("responsable") or ""
+            row_id = _row_id(c.get("categoria"), c["item"], c["descripcion"])
 
-            estado_norm = _norm(estado_raw)
-            categoria = categoria_raw or ""
-            empresa = empresa_raw.strip()
+            flat = {
+                "row_id": row_id,
+                "categoria": c.get("categoria"),
+                "item": c["item"],
+                "descripcion": c["descripcion"],
+                "fecha_toma": c.get("fecha_toma"),
+                "fecha_cierre_proyectada": c.get("fecha_cierre_proyectada"),
+                "fecha_cierre_efectiva": c.get("fecha_cierre_efectiva"),
+                "responsable": c.get("responsable"),
+                "status_raw": c.get("status_raw"),
+                "estado": c.get("estado"),
+                "observacion": c.get("observacion"),
+            }
+            flat_rows.append(flat)
 
-            por_estado[estado_raw or ""] += 1
-            por_categoria[categoria] += 1
+            unified = {
+                "row_id": row_id,
+                "meta": {
+                    "categoria": c.get("categoria"),
+                    "item": c["item"],
+                },
+                "compromiso": {
+                    "descripcion": c["descripcion"],
+                    "fechas": {
+                        "toma": c.get("fecha_toma"),
+                        "cierre_proyectada": c.get("fecha_cierre_proyectada"),
+                        "cierre_efectiva": c.get("fecha_cierre_efectiva"),
+                    },
+                    "responsable": c.get("responsable"),
+                    "estado": {
+                        "raw": c.get("status_raw"),
+                        "canonical": c.get("estado"),
+                    },
+                    "observacion": c.get("observacion"),
+                },
+            }
+            unified_rows.append(unified)
 
-            e = por_empresa.setdefault(
-                empresa,
-                {"numero_compromiso": 0, "abierto": 0, "cerrado": 0},
-            )
-            e["numero_compromiso"] += 1
+        return flat_rows, unified_rows
 
-            is_cerrado = estado_norm.startswith("cerrad")
-            is_abierto = estado_norm.startswith("abiert")
+    def _build_summary(self, flat_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Métricas:
+        - total
+        - por estado (raw y canonical)
+        - por categoría
+        - por responsable/empresa (n, abiertos, cerrados)
+        """
+        from collections import Counter, defaultdict
 
-            if is_cerrado:
-                e["cerrado"] += 1
-            elif is_abierto or estado_norm:  # INF/Informativo los contamos como abiertos
-                e["abierto"] += 1
-            # si estado_norm == "" lo dejamos en ninguno
+        total = len(flat_rows)
+        por_estado_raw: Counter[str] = Counter()
+        por_estado_canon: Counter[str] = Counter()
+        por_categoria: Counter[str] = Counter()
+        por_empresa = defaultdict(lambda: {"numero_compromiso": 0, "abierto": 0, "cerrado": 0})
 
-        summary = {
-            "n_compromisos": n,
-            "por_estado": dict(por_estado),
+        for r in flat_rows:
+            por_estado_raw[r.get("status_raw") or ""] += 1
+            por_estado_canon[r.get("estado") or "desconocido"] += 1
+            por_categoria[r.get("categoria") or ""] += 1
+
+            empresa = (r.get("responsable") or "").strip()
+            if empresa:
+                por_empresa[empresa]["numero_compromiso"] += 1
+                if r.get("estado") == "cerrado":
+                    por_empresa[empresa]["cerrado"] += 1
+                elif r.get("estado") in ("abierto", "informativo", "desconocido"):
+                    por_empresa[empresa]["abierto"] += 1
+
+        return {
+            "n_compromisos": total,
+            "por_estado_raw": dict(por_estado_raw),
+            "por_estado": dict(por_estado_canon),
             "por_categoria": dict(por_categoria),
-            "por_empresa": por_empresa,
+            "por_empresa": dict(por_empresa),
+            "samples": {
+                "flat": flat_rows[:2]
+            }
         }
-        return summary
+
+# ---------- Shim opcional: delegar persistencia al loader ----------
+
+def persist_compromisos(out: dict, pod=None, dry_run: bool = False) -> dict:
+    """
+    Shim fino para mantener compatibilidad: delega en el loader dedicado.
+    """
+    try:
+        from pretdb.etl.loaders import get_loader
+        loader = get_loader("compromisos")
+        if not loader:
+            return {
+                "mode": "dry" if dry_run else "write",
+                "skipped": len(out.get("flat_rows") or []),
+                "warning": "No loader registrado para 'compromisos'"
+            }
+        return loader.persist(pod, out, dry_run=dry_run)
+    except Exception as e:
+        logger.exception("Error delegando persistencia de compromisos: %s", e)
+        return {"error": str(e), "mode": "dry" if dry_run else "write"}
+
+
+def run_and_persist_compromisos(df_raw: pd.DataFrame, meta: dict, pod, dry_run: bool = False) -> Dict[str, Any]:
+    """
+    Conveniencia: transformar + persistir en una sola llamada (útil en management command).
+    """
+    tr = CompromisosTransformer()
+    out = tr.run_df(df_raw, meta=meta, dry_run=dry_run)
+    stats = persist_compromisos(out, pod=pod, dry_run=dry_run)
+    return {
+        "sheet": tr.sheet_key,
+        "rows": out.get("rows"),
+        "dry_run": dry_run,
+        "summary": out.get("summary"),
+        "persist_result": stats,
+    }

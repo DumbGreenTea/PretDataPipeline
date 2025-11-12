@@ -1,3 +1,4 @@
+# pretdb/models.py
 from django.db import models
 
 # Create your models here.
@@ -303,6 +304,12 @@ class PlanAnterior(models.Model):
     cantidad_programada = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     cantidad_real = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     cumplimiento = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
+    
+    # --- 💡 CAMBIO AÑADIDO AQUÍ 💡 ---
+    # Para guardar si la actividad estaba en la sección "Realizadas" (True)
+    # o "No Realizadas" (False).
+    realizada = models.BooleanField(blank=True, null=True)
+    # --- FIN DEL CAMBIO ---
 
     class Meta:
         indexes = [models.Index(fields=['fecha'])]
@@ -730,4 +737,3 @@ class Layout(models.Model):
     class Meta:
         verbose_name = "Layout"
         verbose_name_plural = "Layouts"
-

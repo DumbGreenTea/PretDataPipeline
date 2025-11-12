@@ -2,8 +2,11 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 import logging, re, unicodedata
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import pandas as pd
+
+from django.db import transaction, connection
+from pretdb.models import Pod, Trabajador, Asistencia, AsistenciaDetalle, Contrato
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +58,7 @@ def _to_hh(val: Any) -> Optional[float]:
         except Exception:
             pass
     ns = _norm(s)
-    if any(tok in ns for tok in ("ok","si","si ","presente","present","✔","✅","🟢","🟩")):
+    if any(tok in ns for tok in ("ok","si","presente","present","✔","✅","🟢","🟩")):
         return 1.0
     if any(tok in ns for tok in ("x","no","ausente","✖","❌","🔴","🟥")):
         return 0.0
@@ -75,6 +78,29 @@ def _initials_from_name(name: str) -> Optional[str]:
     else:
         code = parts[0][:2].upper()
     return code or None
+
+def _digits_only(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    m = re.findall(r"\d+", s)
+    return "".join(m) if m else None
+
+def _split_nombre_contrato(nombre: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    'CC-006-CONSTRUCCION ...' -> ('CC-006','CONSTRUCCION ...')
+    """
+    if not nombre:
+        return None, None
+    txt = str(nombre).strip()
+    parts = txt.split("-", 1)
+    if len(parts) == 2:
+        code = parts[0].strip() or None
+        tail = parts[1].strip() or None
+        return code, tail
+    m = re.match(r"^([A-Za-z]{2,3}-?\d{2,})\s+(.*)$", txt)
+    if m:
+        return m.group(1), (m.group(2) or None)
+    return None, txt
 
 # --------------------------- patrones de encabezado ---------------------------
 
@@ -106,10 +132,14 @@ SUMMARY_ROW_FLAGS = (
     "no asiste",
 )
 
+# Header contrato en hoja asistencia
+CONTRATO_PAT = re.compile(r"Contrato:\s*([0-9]{6,})", re.I)
+NOMBRE_PAT = re.compile(r"Nombre:\s*(.+)$", re.I)
+
 # ------------------------------ clase principal ------------------------------
 
 class AsistenciaTransformer:
-    """Extrae detalle de asistencia por persona y por día desde '2. Asistencia'."""
+    """Extrae detalle de asistencia por persona y por día desde '2. Asistencia' y persiste en modelos."""
     sheet_key = "asistencia"
 
     # -------------------------- API p/orquestador --------------------------
@@ -119,10 +149,14 @@ class AsistenciaTransformer:
 
         df = df_raw.copy()
 
+        # (Opcional) Leer contrato/nombre desde encabezado de la hoja Asistencia
+        contrato_num, contrato_nombre = self._parse_contrato_header(df)
+
         header_row, colmap_person, colmap_days = self._find_header_and_columns(df)
         if header_row is None:
             raise ValueError("No se pudo detectar encabezado en 'Asistencia'.")
 
+        # fila de fechas = header_row + 1 (si hay desfaces, se cubrirá con fallback en persist)
         date_row_idx = header_row + 1 if header_row + 1 < len(df) else None
         dates = self._extract_dates(df, date_row_idx, colmap_days) if date_row_idx is not None else {}
 
@@ -147,11 +181,11 @@ class AsistenciaTransformer:
             }
             for dkey in colmap_days.keys():
                 hh = p["days"].get(dkey)
-                # Para lectura simple, None -> 0.0
+                # Para lectura simple, None -> 0.0 (pero en persistencia distinguimos None)
                 row_out[dkey] = 0.0 if hh is None else hh
             persons_detail.append(row_out)
 
-        # Métricas
+        # Métricas (solo informativas del preview)
         presentes_por_dia: Dict[str, int] = {}
         ausentes_por_dia: Dict[str, int] = {}
         for dkey in colmap_days.keys():
@@ -187,10 +221,72 @@ class AsistenciaTransformer:
             "rows": n_personas * n_dias,
             "summary": summary,
             "persons_detail": persons_detail,
+            "dates_map": dates,  # <- date objects por día
+            "contrato": {"numero": contrato_num, "nombre": contrato_nombre},  # opcional
             "dry_run": dry_run,
         }
 
+    def persist(self, result: dict, run_id: int) -> Tuple[int, Dict, Optional[Dict]]:
+            """Shim persist: resolve Pod from run_id and delegate to AsistenciaLoader.persist
+
+            Returns the same tuple (rows_upserted, warnings, errors) as before.
+            """
+            try:
+                from pretdb.etl.loaders.asistencia_loader import AsistenciaLoader as _Loader
+            except Exception as e:
+                logger.warning("AsistenciaLoader shim: no se pudo importar loader: %s", e)
+                return 0, {"import_error": str(e)}, None
+
+            pod = self._get_pod_obj(run_id)
+            if pod is None:
+                return 0, {"pod_id": "etl_run.pod_id es NULL; ejecuta 'portada' antes."}, None
+
+            loader = _Loader()
+            dry = result.get("dry_run", False)
+            try:
+                return loader.persist(pod, result, dry_run=dry)
+            except Exception as e:
+                logger.exception("AsistenciaLoader shim: error delegating persist: %s", e)
+                return 0, {"persist_error": str(e)}, None
+
     # --------------------------- helpers internos ---------------------------
+
+    def _get_pod_obj(self, run_id: int) -> Optional[Pod]:
+        with connection.cursor() as cur:
+            cur.execute("SELECT pod_id FROM etl_run WHERE id=%s", [run_id])
+            row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        try:
+            return Pod.objects.get(id=row[0])
+        except Pod.DoesNotExist:
+            return None
+
+    def _parse_contrato_header(self, df: pd.DataFrame, max_rows: int = 20, max_cols: int = 10) -> Tuple[Optional[str], Optional[str]]:
+        num = None
+        nombre = None
+        sub = df.iloc[:max_rows, :max_cols].fillna("")
+        for _, row in sub.iterrows():
+            line = "  ".join([str(x) for x in row.tolist()])
+            line = re.sub(r"\s+", " ", line).strip()
+            if not num:
+                m1 = CONTRATO_PAT.search(line)
+                if m1: num = m1.group(1)
+            if not nombre:
+                m2 = NOMBRE_PAT.search(line)
+                if m2: nombre = m2.group(1).strip()
+            if num and nombre:
+                break
+            # por si vienen en celdas separadas
+            for cell in row.tolist():
+                s = str(cell)
+                if not num:
+                    m1c = CONTRATO_PAT.search(s)
+                    if m1c: num = m1c.group(1)
+                if not nombre:
+                    m2c = NOMBRE_PAT.search(s)
+                    if m2c: nombre = m2c.group(1).strip()
+        return num, nombre
 
     def _find_header_and_columns(
         self, df: pd.DataFrame
@@ -337,3 +433,20 @@ class AsistenciaTransformer:
 
         logger.debug("Asistencia: personas=%s", len(persons))
         return persons
+
+# ----------------------- Wrapper compatible con orquestador -----------------------
+
+def load_asistencia(df: pd.DataFrame, run_id: int, sheet: str):
+    """
+    Lo llama el orquestador. Transforma y luego persiste (INSERT/UPSERT).
+    Retorna (rows_in, rows_upserted, warnings, errors)
+    """
+    tr = AsistenciaTransformer()
+    result = tr.run_df(df, meta={"sheet": sheet}, dry_run=False)
+    rows_in = result.get("rows", 0)
+    try:
+        rows_upserted, warnings, errors = tr.persist(result, run_id=run_id)
+        return rows_in, rows_upserted, warnings, errors
+    except Exception as e:
+        logger.exception("Error en persistencia de asistencia: %s", e)
+        return rows_in, 0, {}, {"persist": str(e)}

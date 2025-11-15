@@ -3,8 +3,12 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import date, datetime
+
+import pandas as pd
 from django.db import transaction
 from django.apps import apps
+
+from pretdb.etl.loaders.registry import register_loader
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +48,22 @@ def _to_float(val: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
+def _to_int(val: Any) -> Optional[int]:
+    if val is None or val == "":
+        return None
+    try:
+        return int(float(str(val)))
+    except (TypeError, ValueError):
+        return None
 
+def _truncate(text: Optional[str], maxlen: int) -> Optional[str]:
+    if text is None:
+        return None
+    s = str(text)
+    return s[:maxlen] if len(s) > maxlen else s
+
+
+@register_loader("plan_dia")
 class PlanDiaLoader:
     """
     Carga datos de Plan del Día desde el transformer
@@ -55,6 +74,7 @@ class PlanDiaLoader:
         self.Pod = _get_model(pretdb, "Pod")
         self.PlanDia = _get_model(pretdb, "PlanDia")
         self.HorarioInicio = _get_model(pretdb, "HorarioInicio")
+        self.PlanDiaRestricciones = _get_model(pretdb, "PlanDiaRestricciones")
 
     @transaction.atomic
     def persist(
@@ -124,28 +144,31 @@ class PlanDiaLoader:
                 try:
                     actividad_obj, created = self.PlanDia.objects.update_or_create(
                         pod=pod,
-                        id_p6=actividad_data.get("id_p6"),
-                        descripcion_item=actividad_data.get("descripcion_item"),
+                        id_p6=_truncate(actividad_data.get("id_p6"), 50),
+                        descripcion_item=_truncate(actividad_data.get("descripcion_item"), 150),
                         defaults={
                             'fecha': _to_date(actividad_data.get("fecha")) or pod.fecha,
-                            'nro_pod': actividad_data.get("nro_pod"),
-                            'tipo_tc': actividad_data.get("tipo_tc"),
-                            'responsable': actividad_data.get("responsable"),
-                            'ruta_critica': actividad_data.get("ruta_critica"),
-                            'area_trabajo': actividad_data.get("area_trabajo"),
-                            'unidad': actividad_data.get("unidad"),
-                            'cant_programada': _to_float(actividad_data.get("cant_programada")),
-                            'cant_proyectada_dia': _to_float(actividad_data.get("cant_proyectada_dia")),
-                            'riesgos_criticos': actividad_data.get("riesgos_criticos"),
-                            'restricciones': actividad_data.get("restricciones"),
-                            'restricciones_resp': actividad_data.get("restricciones_resp"),
-                            'tipo_actividad': tipo_actividad,
-                            'realizable': realizable,
+                            'numero_pod': _to_int(actividad_data.get("nro_pod")),
+                            'tipo_plan': _truncate(actividad_data.get("tipo_tc"), 30),
+                            'responsable': _truncate(actividad_data.get("responsable"), 100),
+                            'ruta_critica': _truncate(actividad_data.get("ruta_critica"), 100),
+                            'area_trabajo': _truncate(actividad_data.get("area_trabajo"), 100),
+                            'unidad': _truncate(actividad_data.get("unidad"), 10),
+                            'cantidad_programada': _to_float(actividad_data.get("cant_programada")),
+                            'cantidad_proyectada_dia': _to_float(actividad_data.get("cant_proyectada_dia")),
+                            'riesgos_criticos': _truncate(actividad_data.get("riesgos_criticos"), 200),
                         }
                     )
                     if created:
                         actividades_procesadas += 1
                         total_rows += 1
+
+                    self._persist_restriccion(
+                        actividad_obj,
+                        actividad_data.get("restricciones"),
+                        actividad_data.get("restricciones_resp"),
+                        warnings,
+                    )
                 except Exception as e:
                     descripcion = actividad_data.get('descripcion_item', 'Sin descripción')
                     warnings.setdefault("actividades", []).append(f"'{descripcion}': {e}")
@@ -233,7 +256,23 @@ class PlanDiaLoader:
         except Exception as e:
             logger.warning(f"No se pudo crear resumen de PlanDia: {e}")
 
-# Registro en el sistema de loaders
-def register_loader():
-    from etl.registry import register_loader
-    register_loader("plan_dia")(PlanDiaLoader)
+    def _persist_restriccion(
+        self,
+        plan_dia_obj: Any,
+        restriccion_texto: Optional[str],
+        responsable: Optional[str],
+        warnings: Dict[str, Any],
+    ) -> None:
+        """Guarda las restricciones asociadas a la actividad si hay modelo disponible."""
+        if not self.PlanDiaRestricciones or not plan_dia_obj:
+            return
+        if not restriccion_texto:
+            return
+        try:
+            self.PlanDiaRestricciones.objects.update_or_create(
+                plan_dia=plan_dia_obj,
+                descripcion=_truncate(restriccion_texto, 200),
+                defaults={"tipo": _truncate(responsable, 50)},
+            )
+        except Exception as exc:
+            warnings.setdefault("restricciones", []).append(str(exc))

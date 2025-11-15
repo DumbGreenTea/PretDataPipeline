@@ -6,6 +6,8 @@ from datetime import date, datetime
 from django.db import transaction
 from django.apps import apps
 
+from pretdb.etl.loaders.registry import register_loader
+
 logger = logging.getLogger(__name__)
 
 def _get_model(app_label: str, model_name: str):
@@ -56,6 +58,7 @@ def _normalizar_estado(estado_raw: Optional[str]) -> str:
         return "desconocido"
 
 
+@register_loader("compromisos")
 class CompromisosLoader:
     """
     Carga datos de Compromisos desde el transformer
@@ -65,8 +68,6 @@ class CompromisosLoader:
         pretdb = "pretdb"
         self.Pod = _get_model(pretdb, "Pod")
         self.Compromiso = _get_model(pretdb, "Compromiso")
-        self.CategoriaCompromiso = _get_model(pretdb, "CategoriaCompromiso")
-        self.Empresa = _get_model(pretdb, "Empresa")
 
     @transaction.atomic
     def persist(
@@ -83,7 +84,7 @@ class CompromisosLoader:
         Returns:
             Tuple[int, Dict, Optional[Dict]]: (rows_upserted, warnings, errors)
         """
-        warnings = {}
+        warnings: Dict[str, List[str]] = {}
         errors = None
         
         if not self.Pod or not self.Compromiso:
@@ -107,113 +108,36 @@ class CompromisosLoader:
         # Estadísticas
         total_rows = 0
         compromisos_procesados = 0
-        categorias_procesadas = 0
-        empresas_procesadas = 0
 
         try:
-            # Cache para objetos reutilizables
-            categorias_cache = {}
-            empresas_cache = {}
-
             for row_data in flat_rows:
-                # Obtener datos normalizados
-                categoria_nombre = _truncate(row_data.get("categoria"), 100)
-                item_numero = row_data.get("item")
-                descripcion = _truncate(row_data.get("descripcion"), 500)
+                item_numero = _truncate(row_data.get("item"), 50)
+                descripcion = row_data.get("descripcion")
                 responsable = _truncate(row_data.get("responsable"), 100)
                 estado_raw = row_data.get("status_raw")
                 estado_normalizado = _normalizar_estado(estado_raw)
 
                 if dry_run:
-                    logger.debug(f"🔶 DRY RUN - Compromiso: {item_numero} - {descripcion[:50]}...")
+                    logger.debug(f"🔶 DRY RUN - Compromiso: {item_numero} - {descripcion or ''}")
                     continue
 
-                # 1. Procesar categoría
-                categoria_obj = None
-                if categoria_nombre:
-                    try:
-                        if categoria_nombre not in categorias_cache:
-                            if self.CategoriaCompromiso:
-                                categoria_obj, created = self.CategoriaCompromiso.objects.update_or_create(
-                                    nombre=categoria_nombre,
-                                    defaults={'descripcion': categoria_nombre}
-                                )
-                            else:
-                                # Si no existe modelo separado, usar campo directo
-                                categoria_obj = None
-                            categorias_cache[categoria_nombre] = categoria_obj
-                            if created:
-                                categorias_procesadas += 1
-                                total_rows += 1
-                        else:
-                            categoria_obj = categorias_cache[categoria_nombre]
-                    except Exception as e:
-                        warnings.setdefault("categorias", []).append(f"'{categoria_nombre}': {e}")
-
-                # 2. Procesar empresa/responsable
-                empresa_obj = None
-                if responsable:
-                    try:
-                        if responsable not in empresas_cache:
-                            if self.Empresa:
-                                empresa_obj, created = self.Empresa.objects.update_or_create(
-                                    nombre=responsable,
-                                    defaults={'nombre': responsable}
-                                )
-                            else:
-                                # Si no existe modelo separado, usar campo directo
-                                empresa_obj = None
-                            empresas_cache[responsable] = empresa_obj
-                            if created:
-                                empresas_procesadas += 1
-                                total_rows += 1
-                        else:
-                            empresa_obj = empresas_cache[responsable]
-                    except Exception as e:
-                        warnings.setdefault("empresas", []).append(f"'{responsable}': {e}")
-
-                # 3. Crear/actualizar compromiso
                 try:
-                    # Determinar clave única para el compromiso
-                    if categoria_obj and self.CategoriaCompromiso:
-                        # Con modelo de categoría
-                        compromiso_obj, created = self.Compromiso.objects.update_or_create(
-                            pod=pod,
-                            categoria=categoria_obj,
-                            numero_item=item_numero,
-                            defaults={
-                                'descripcion': descripcion,
-                                'fecha_toma': _to_date(row_data.get("fecha_toma")),
-                                'fecha_cierre_proyectada': _to_date(row_data.get("fecha_cierre_proyectada")),
-                                'fecha_cierre_efectiva': _to_date(row_data.get("fecha_cierre_efectiva")),
-                                'responsable': empresa_obj if empresa_obj else responsable,
-                                'estado_raw': _truncate(estado_raw, 50),
-                                'estado': estado_normalizado,
-                                'observaciones': _truncate(row_data.get("observacion"), 500),
-                            }
-                        )
-                    else:
-                        # Sin modelo de categoría o con categoría como texto
-                        compromiso_obj, created = self.Compromiso.objects.update_or_create(
-                            pod=pod,
-                            categoria_texto=categoria_nombre,
-                            numero_item=item_numero,
-                            defaults={
-                                'descripcion': descripcion,
-                                'fecha_toma': _to_date(row_data.get("fecha_toma")),
-                                'fecha_cierre_proyectada': _to_date(row_data.get("fecha_cierre_proyectada")),
-                                'fecha_cierre_efectiva': _to_date(row_data.get("fecha_cierre_efectiva")),
-                                'responsable': empresa_obj if empresa_obj else responsable,
-                                'estado_raw': _truncate(estado_raw, 50),
-                                'estado': estado_normalizado,
-                                'observaciones': _truncate(row_data.get("observacion"), 500),
-                            }
-                        )
-                    
+                    compromiso_obj, created = self.Compromiso.objects.update_or_create(
+                        pod=pod,
+                        item=item_numero,
+                        defaults={
+                            'descripcion': descripcion,
+                            'fecha_toma_compromiso': _to_date(row_data.get("fecha_toma")),
+                            'fecha_cierre_proyectada': _to_date(row_data.get("fecha_cierre_proyectada")),
+                            'fecha_cierre_efectiva': _to_date(row_data.get("fecha_cierre_efectiva")),
+                            'responsable': responsable,
+                            'status': estado_normalizado,
+                                'observacion': row_data.get("observacion"),
+                        }
+                    )
                     if created:
                         compromisos_procesados += 1
                         total_rows += 1
-                        
                 except Exception as e:
                     desc = descripcion or "Sin descripción"
                     warnings.setdefault("compromisos", []).append(f"Item {item_numero} - '{desc}': {e}")
@@ -221,8 +145,6 @@ class CompromisosLoader:
             # Resumen final
             stats = {
                 "compromisos_procesados": compromisos_procesados,
-                "categorias_procesadas": categorias_procesadas,
-                "empresas_procesadas": empresas_procesadas,
                 "total_compromisos": len(flat_rows),
                 "por_estado": summary.get("por_estado", {}),
                 "por_categoria": summary.get("por_categoria", {}),
@@ -230,8 +152,7 @@ class CompromisosLoader:
             }
             
             if not dry_run:
-                logger.info(f"✅ Compromisos procesados: {compromisos_procesados} compromisos, {categorias_procesadas} categorías, {empresas_procesadas} empresas")
-                # Log resumen por estado
+                logger.info(f"✅ Compromisos procesados: {compromisos_procesados} registros actualizados")
                 for estado, cantidad in stats["por_estado"].items():
                     logger.info(f"   - {estado}: {cantidad}")
             else:
@@ -242,28 +163,3 @@ class CompromisosLoader:
         except Exception as e:
             logger.exception("Error en persistencia de Compromisos: %s", e)
             return 0, warnings, {"persist": str(e)}
-
-    def _crear_resumen_compromisos(self, pod: Any, stats: Dict[str, Any]) -> None:
-        """Crea un registro de resumen de compromisos"""
-        try:
-            from pretdb.models import ResumenCompromisos
-            resumen, created = ResumenCompromisos.objects.update_or_create(
-                pod=pod,
-                defaults={
-                    'total_compromisos': stats.get("total_compromisos", 0),
-                    'compromisos_abiertos': stats.get("por_estado", {}).get("abierto", 0),
-                    'compromisos_cerrados': stats.get("por_estado", {}).get("cerrado", 0),
-                    'compromisos_informativos': stats.get("por_estado", {}).get("informativo", 0),
-                    'total_categorias': stats.get("categorias_procesadas", 0),
-                    'total_empresas': stats.get("empresas_procesadas", 0),
-                }
-            )
-            if created:
-                logger.info(f"✅ Resumen Compromisos creado para POD {pod.numero_pod}")
-        except Exception as e:
-            logger.warning(f"No se pudo crear resumen de Compromisos: {e}")
-
-# Registro en el sistema de loaders
-def register_loader():
-    from etl.registry import register_loader
-    register_loader("compromisos")(CompromisosLoader)

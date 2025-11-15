@@ -4,8 +4,12 @@ from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import date, datetime
 from decimal import Decimal
+
+import pandas as pd
 from django.db import transaction
 from django.apps import apps
+
+from pretdb.etl.loaders.registry import register_loader
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +90,16 @@ def _truncate(s: Optional[str], maxlen: int) -> Optional[str]:
     s = str(s)
     return s[:maxlen] if len(s) > maxlen else s
 
+def _to_int(val: Any) -> Optional[int]:
+    if val is None or val == "":
+        return None
+    try:
+        return int(float(str(val)))
+    except (TypeError, ValueError):
+        return None
 
+
+@register_loader("ppc")
 class PPCLoader:
     """
     Carga datos de PPC (Percent Plan Complete) desde el transformer
@@ -95,8 +108,8 @@ class PPCLoader:
     def __init__(self) -> None:
         pretdb = "pretdb"
         self.Pod = _get_model(pretdb, "Pod")
-        self.PPCSemanal = _get_model(pretdb, "PPCSemanal")
-        self.PPCDiario = _get_model(pretdb, "PPCDiario")
+        self.PpcSemanal = _get_model(pretdb, "PpcSemanal")
+        self.PpcDiario = _get_model(pretdb, "PpcDiario")
 
     @transaction.atomic
     def persist(
@@ -116,8 +129,8 @@ class PPCLoader:
         warnings = {}
         errors = None
         
-        if not self.Pod or not self.PPCDiario:
-            error_msg = "Modelos Pod o PPCDiario no encontrados"
+        if not self.Pod or not self.PpcDiario or not self.PpcSemanal:
+            error_msg = "Modelos Pod/Ppc no encontrados"
             logger.error(error_msg)
             return 0, {}, {"models": error_msg}
 
@@ -140,61 +153,89 @@ class PPCLoader:
         ppc_semanales_procesados = 0
 
         try:
-            # Procesar datos diarios de PPC
+            registros: List[Dict[str, Any]] = []
+            fechas_validas: List[date] = []
+            total_programadas = 0
+            total_realizadas = 0
+            ratios: List[Decimal] = []
+
             for row_data in flat_rows:
                 fecha = _to_date(row_data.get("fecha"))
-                dia_semana = _truncate(row_data.get("dia_semana"), 20)
-                programadas = row_data.get("programadas")
-                realizadas = row_data.get("realizadas")
-                ppc_porcentaje = row_data.get("ppc_porcentaje")
-
                 if not fecha:
-                    warnings.setdefault("fechas_invalidas", []).append(
-                        f"Fila sin fecha válida: {row_data}"
-                    )
+                    warnings.setdefault("fechas_invalidas", []).append(f"Fila sin fecha válida: {row_data}")
                     continue
 
-                if dry_run:
-                    logger.debug(f"🔶 DRY RUN - PPC: {fecha} - Prog: {programadas}, Real: {realizadas}, PPC: {ppc_porcentaje}")
-                    ppc_diarios_procesados += 1
-                    continue
+                dia_semana = _truncate(row_data.get("dia_semana"), 20)
+                programadas = _to_int(row_data.get("programadas"))
+                realizadas = _to_int(row_data.get("realizadas"))
+                ratio = _to_ratio(row_data.get("ppc_porcentaje"))
 
-                # 1. Crear/actualizar PPC diario
-                try:
-                    ppc_diario_obj, created = self.PPCDiario.objects.update_or_create(
-                        pod=pod,
-                        fecha=fecha,
-                        defaults={
-                            'dia_semana': dia_semana,
-                            'actividades_programadas': _to_decimal(programadas, 2),
-                            'actividades_realizadas': _to_decimal(realizadas, 2),
-                            'ppc_porcentaje': _to_ratio(ppc_porcentaje),
-                            'comentarios': None,  # Por si acaso hay campo de comentarios
-                        }
-                    )
-                    if created:
-                        ppc_diarios_procesados += 1
-                        total_rows += 1
-                        logger.debug(f"✅ PPC diario creado: {fecha} - {ppc_porcentaje}")
-                        
-                except Exception as e:
-                    fecha_str = fecha.isoformat() if fecha else "Fecha desconocida"
-                    warnings.setdefault("ppc_diario", []).append(f"'{fecha_str}': {e}")
+                if programadas:
+                    total_programadas += programadas
+                if realizadas:
+                    total_realizadas += realizadas
+                if ratio is not None:
+                    ratios.append(ratio)
 
-            # 2. Calcular y crear PPC semanal (resumen)
-            if not dry_run and ppc_diarios_procesados > 0:
-                try:
-                    self._procesar_ppc_semanal(pod, flat_rows, warnings)
-                    ppc_semanales_procesados = 1  # Solo creamos un registro semanal
-                    total_rows += 1
-                except Exception as e:
-                    warnings["ppc_semanal"] = f"No se pudo crear PPC semanal: {e}"
+                registros.append(
+                    {
+                        "fecha": fecha,
+                        "dia_semana": dia_semana,
+                        "programadas": programadas,
+                        "realizadas": realizadas,
+                        "ratio": ratio,
+                    }
+                )
+                fechas_validas.append(fecha)
 
-            # Resumen final
+            if dry_run:
+                ppc_diarios_procesados = len(registros)
+            else:
+                semanal_obj = None
+                if self.PpcSemanal and fechas_validas:
+                    fecha_inicio = min(fechas_validas)
+                    fecha_fin = max(fechas_validas)
+                    promedio = sum(ratios) / len(ratios) if ratios else None
+                    try:
+                        semanal_obj, created = self.PpcSemanal.objects.update_or_create(
+                            pod=pod,
+                            fecha_inicio=fecha_inicio,
+                            fecha_fin=fecha_fin,
+                            defaults={
+                                "ppc_total": promedio,
+                                "programadas_total": total_programadas,
+                                "realizadas_total": total_realizadas,
+                            },
+                        )
+                        if created:
+                            ppc_semanales_procesados = 1
+                            total_rows += 1
+                    except Exception as exc:
+                        warnings["ppc_semanal"] = str(exc)
+
+                if self.PpcDiario and semanal_obj:
+                    for item in registros:
+                        try:
+                            _, created = self.PpcDiario.objects.update_or_create(
+                                ppc=semanal_obj,
+                                fecha=item["fecha"],
+                                defaults={
+                                    "dia_nombre": item["dia_semana"],
+                                    "programadas": item["programadas"],
+                                    "realizadas": item["realizadas"],
+                                    "ppc_dia": item["ratio"],
+                                },
+                            )
+                            if created:
+                                ppc_diarios_procesados += 1
+                                total_rows += 1
+                        except Exception as exc:
+                            warnings.setdefault("ppc_diario", []).append(f"{item['fecha']}: {exc}")
+
             stats = {
                 "ppc_diarios_procesados": ppc_diarios_procesados,
                 "ppc_semanales_procesados": ppc_semanales_procesados,
-                "total_dias": len(flat_rows),
+                "total_dias": len(registros),
                 "rango_fechas": self._obtener_rango_fechas(flat_rows),
                 "ppc_promedio": self._calcular_ppc_promedio(flat_rows),
             }
@@ -211,57 +252,6 @@ class PPCLoader:
         except Exception as e:
             logger.exception("Error en persistencia de PPC: %s", e)
             return 0, warnings, {"persist": str(e)}
-
-    def _procesar_ppc_semanal(self, pod: Any, flat_rows: List[Dict[str, Any]], warnings: Dict[str, Any]) -> None:
-        """Calcula y crea el resumen semanal de PPC"""
-        if not self.PPCSemanal:
-            return
-
-        try:
-            # Calcular promedios y totales semanales
-            total_programadas = 0
-            total_realizadas = 0
-            ppc_promedio = 0
-            ppc_valores = []
-            
-            for row in flat_rows:
-                prog = row.get("programadas") or 0
-                real = row.get("realizadas") or 0
-                ppc = row.get("ppc_porcentaje")
-                
-                total_programadas += prog
-                total_realizadas += real
-                if ppc is not None:
-                    ppc_valores.append(ppc)
-
-            # Calcular PPC promedio
-            if ppc_valores:
-                ppc_promedio = sum(ppc_valores) / len(ppc_valores)
-
-            # Obtener rango de fechas
-            fechas = [row.get("fecha") for row in flat_rows if row.get("fecha")]
-            if fechas:
-                fecha_inicio = min(fechas)
-                fecha_fin = max(fechas)
-                
-                # Crear registro semanal
-                ppc_semanal_obj, created = self.PPCSemanal.objects.update_or_create(
-                    pod=pod,
-                    fecha_inicio=fecha_inicio,
-                    fecha_fin=fecha_fin,
-                    defaults={
-                        'total_actividades_programadas': _to_decimal(total_programadas, 2),
-                        'total_actividades_realizadas': _to_decimal(total_realizadas, 2),
-                        'ppc_promedio': _to_ratio(ppc_promedio),
-                        'dias_con_datos': len(flat_rows),
-                    }
-                )
-                
-                if created:
-                    logger.info(f"✅ PPC semanal creado: {fecha_inicio} a {fecha_fin} - PPC: {ppc_promedio:.2%}")
-                    
-        except Exception as e:
-            warnings["ppc_semanal_calc"] = f"Error en cálculo PPC semanal: {e}"
 
     def _obtener_rango_fechas(self, flat_rows: List[Dict[str, Any]]) -> Optional[Dict[str, str]]:
         """Obtiene el rango de fechas de los datos PPC"""
@@ -285,25 +275,3 @@ class PPCLoader:
             return None
             
         return sum(ppc_valores) / len(ppc_valores)
-
-    def _crear_resumen_ppc(self, pod: Any, stats: Dict[str, Any]) -> None:
-        """Crea un registro de resumen de PPC"""
-        try:
-            from pretdb.models import ResumenPPC
-            resumen, created = ResumenPPC.objects.update_or_create(
-                pod=pod,
-                defaults={
-                    'total_dias': stats.get("total_dias", 0),
-                    'ppc_promedio': _to_ratio(stats.get("ppc_promedio")),
-                    'dias_con_ppc': stats.get("ppc_diarios_procesados", 0),
-                }
-            )
-            if created:
-                logger.info(f"✅ Resumen PPC creado para POD {pod.numero_pod}")
-        except Exception as e:
-            logger.warning(f"No se pudo crear resumen de PPC: {e}")
-
-# Registro en el sistema de loaders
-def register_loader():
-    from etl.registry import register_loader
-    register_loader("ppc")(PPCLoader)

@@ -5,6 +5,8 @@ from datetime import datetime, date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import pandas as pd
 
+from pretdb.etl.transformers.registry import register_transformer
+
 logger = logging.getLogger(__name__)
 
 # =============================== utilidades ===============================
@@ -131,6 +133,7 @@ HEADER_HINTS: Dict[str, re.Pattern] = {
 
 # ============================= TRANSFORMER =============================
 
+@register_transformer("dotacion_y_maquinaria")
 class DotacionMaquinariaTransformer:
     sheet_key = "dotacion_y_maquinaria"
 

@@ -19,6 +19,21 @@ class ETLOrchestrator:
     y entrega estadísticas homogéneas para cada etapa.
     """
 
+    ALLOWED_SHEETS = {
+        "portada",
+        "asistencia",
+        "sso",
+        "plan_anterior",
+        "plan_dia",
+        "monografia_pead",
+        "monografias_cruces",
+        "dotacion_y_maquinaria",
+        "ppc",
+        "matriz_cnc",
+        "compromisos",
+        "layout",
+    }
+
     def __init__(self, *, strategy: str = "patterns") -> None:
         self.strategy = strategy
         try:
@@ -50,6 +65,7 @@ class ETLOrchestrator:
         sheet_meta: Dict[str, Any] = {**(meta or {})}
         sheet_meta.setdefault("sheet_key", sheet_key)
         sheet_meta.setdefault("sheet_name", raw_sheet_name or sheet_key)
+        sheet_meta.setdefault("raw_sheet_name", raw_sheet_name or sheet_meta["sheet_name"])
 
         try:
             transformer = create_transformer(sheet_key)
@@ -71,12 +87,13 @@ class ETLOrchestrator:
                 return result
 
             logger.info("Cargando datos para '%s'", sheet_key)
-            loader_result = loader.persist(
+            loader_result_raw = loader.persist(
                 pod=pod,
                 out=transformer_result,
                 dry_run=dry_run,
                 run_id=sheet_meta.get("run_id"),
             )
+            loader_result = self._normalize_loader_result(loader_result_raw, sheet_key)
             result["loader_result"] = loader_result
             result["status"] = "ok"
             result["success"] = True
@@ -127,6 +144,13 @@ class ETLOrchestrator:
             }
             return summary
 
+        if self.ALLOWED_SHEETS:
+            original_keys = set(workbook.keys())
+            workbook = {k: v for k, v in workbook.items() if k in self.ALLOWED_SHEETS}
+            ignored = sorted(original_keys - set(workbook.keys()))
+            if ignored:
+                logger.info("Ignorando hojas no permitidas: %s", ", ".join(ignored))
+
         summary["sheets_detected"] = len(workbook)
         pod_context: Optional[Any] = None
         target_keys: Iterable[str]
@@ -156,7 +180,11 @@ class ETLOrchestrator:
                 sheet_key=key,
                 df=df,
                 raw_sheet_name=raw_name,
-                meta={"file_path": file_path, "sheet_name": raw_name},
+                meta={
+                    "file_path": file_path,
+                    "sheet_name": raw_name,
+                    "raw_sheet_name": raw_name,
+                },
                 dry_run=dry_run,
                 pod=pod_context,
             )
@@ -216,6 +244,30 @@ class ETLOrchestrator:
             except self._PodModel.DoesNotExist:
                 logger.warning("No se encontró Pod con numero_pod=%s para contexto ETL.", numero)
         return None
+
+    def _normalize_loader_result(self, loader_result: Any, sheet_key: str) -> Dict[str, Any]:
+        """
+        Adapta salidas antiguas (tuplas) a dict homogéneo para el orquestador.
+        """
+        if isinstance(loader_result, dict):
+            return loader_result
+        if isinstance(loader_result, tuple):
+            rows = loader_result[0] if len(loader_result) > 0 else 0
+            warnings = loader_result[1] if len(loader_result) > 1 else None
+            errors = loader_result[2] if len(loader_result) > 2 else None
+            normalized: Dict[str, Any] = {
+                "rows": rows,
+                "warnings": warnings or [],
+                "errors": errors,
+                "created": bool(rows),
+                "updated": False,
+                "skipped": 0 if rows else 1,
+                "sheet": sheet_key,
+            }
+            return normalized
+        if loader_result is None:
+            return {}
+        return {"result": loader_result, "sheet": sheet_key}
 
 
 def run_file(

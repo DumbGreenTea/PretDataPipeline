@@ -2,8 +2,12 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 import logging
+import re
+
 from django.db import transaction
 from django.apps import apps
+
+from pretdb.etl.loaders.registry import register_loader
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,7 @@ def _norm_code_id(txt: Optional[str]) -> Optional[str]:
     return s
 
 
+@register_loader("matriz_cnc")
 class MatrizCNCLoader:
     """
     Carga datos de Matriz CNC desde el transformer
@@ -235,8 +240,3 @@ class MatrizCNCLoader:
                 logger.info(f"✅ Resumen Matriz CNC creado para POD {pod.numero_pod}")
         except Exception as e:
             logger.warning(f"No se pudo crear resumen de Matriz CNC: {e}")
-
-# Registro en el sistema de loaders
-def register_loader():
-    from etl.registry import register_loader
-    register_loader("matriz_cnc")(MatrizCNCLoader)

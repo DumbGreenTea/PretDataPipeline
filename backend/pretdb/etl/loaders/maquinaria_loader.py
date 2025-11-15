@@ -4,8 +4,12 @@ from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import date, datetime
 from decimal import Decimal
+
+import pandas as pd
 from django.db import transaction
 from django.apps import apps
+
+from pretdb.etl.loaders.registry import register_loader
 
 logger = logging.getLogger(__name__)
 
@@ -68,214 +72,137 @@ def _truncate(s: Optional[str], maxlen: int) -> Optional[str]:
     return s[:maxlen] if len(s) > maxlen else s
 
 
+@register_loader("dotacion_y_maquinaria")
 class DotacionMaquinariaLoader:
     """
-    Carga datos de Dotación y Maquinaria desde el transformer
+    Persiste DotacionEquipo/EquipoCompromiso desde la hoja de dotación y maquinaria.
     """
-    
+
     def __init__(self) -> None:
         pretdb = "pretdb"
         self.Pod = _get_model(pretdb, "Pod")
-        self.DotacionPersonal = _get_model(pretdb, "DotacionPersonal")
-        self.MaquinariaEquipo = _get_model(pretdb, "MaquinariaEquipo")
-        self.CompromisoMaquinaria = _get_model(pretdb, "CompromisoMaquinaria")
+        self.DotacionEquipo = _get_model(pretdb, "DotacionEquipo")
+        self.EquipoCompromiso = _get_model(pretdb, "EquipoCompromiso")
 
     @transaction.atomic
     def persist(
         self,
-        pod,  # Objeto Pod ya creado desde portada
+        pod,
         out: dict,
         *,
         dry_run: bool = False,
         run_id: Optional[int] = None,
     ) -> Tuple[int, Dict[str, Any], Optional[Dict[str, Any]]]:
-        """
-        Persiste los datos de Dotación y Maquinaria
-        
-        Returns:
-            Tuple[int, Dict, Optional[Dict]]: (rows_upserted, warnings, errors)
-        """
-        warnings = {}
-        errors = None
-        
-        if not self.Pod or not self.DotacionPersonal or not self.MaquinariaEquipo:
-            error_msg = "Modelos requeridos no encontrados"
-            logger.error(error_msg)
-            return 0, {}, {"models": error_msg}
+        warnings: Dict[str, List[str]] = {}
+
+        if not self.Pod or not self.DotacionEquipo:
+            msg = "Modelos Pod o DotacionEquipo no encontrados"
+            logger.error(msg)
+            return 0, {}, {"models": msg}
 
         if not pod or not isinstance(pod, self.Pod):
-            error_msg = "Pod no proporcionado o inválido"
-            logger.error(error_msg)
-            return 0, {}, {"pod": error_msg}
+            msg = "Pod no proporcionado o inválido"
+            logger.error(msg)
+            return 0, {}, {"pod": msg}
 
-        # Extraer datos del transformer
-        flat_rows = out.get("flat_rows", [])
-        summary = out.get("summary", {})
-        
+        flat_rows = out.get("flat_rows", []) or []
         if not flat_rows:
-            warnings["sin_datos"] = "No hay datos de Dotación y Maquinaria para procesar"
+            warnings["sin_datos"] = ["Sin filas en dotación y maquinaria"]
             return 0, warnings, None
 
-        # Estadísticas
         total_rows = 0
-        dotacion_procesada = 0
-        maquinaria_procesada = 0
+        equipos_procesados = 0
         compromisos_procesados = 0
 
         try:
             for row_data in flat_rows:
-                # Determinar si es dotación personal o maquinaria
-                es_dotacion = bool(row_data.get("cargo"))
-                es_maquinaria = bool(row_data.get("equipo"))
-                
-                if dry_run:
-                    if es_dotacion:
-                        logger.debug(f"🔶 DRY RUN - Dotación: {row_data.get('cargo')}")
-                    elif es_maquinaria:
-                        logger.debug(f"🔶 DRY RUN - Maquinaria: {row_data.get('equipo')}")
+                descripcion_equipo = _truncate(row_data.get("equipo"), 100)
+                if not descripcion_equipo:
                     continue
 
-                # 1. Procesar dotación personal
-                if es_dotacion:
-                    try:
-                        dotacion_obj, created = self.DotacionPersonal.objects.update_or_create(
-                            pod=pod,
-                            cargo=_truncate(row_data.get("cargo"), 100),
-                            defaults={
-                                'turno_a': _to_int(row_data.get("turno_a")),
-                                'turno_b': _to_int(row_data.get("turno_b")),
-                                'total': self._calcular_total_personal(row_data),
-                            }
-                        )
-                        if created:
-                            dotacion_procesada += 1
-                            total_rows += 1
-                    except Exception as e:
-                        cargo = row_data.get('cargo', 'Sin cargo')
-                        warnings.setdefault("dotacion", []).append(f"'{cargo}': {e}")
+                if dry_run:
+                    equipos_procesados += 1
+                    logger.debug("🔶 DRY RUN - Equipo: %s", descripcion_equipo)
+                    continue
 
-                # 2. Procesar maquinaria y equipos
-                if es_maquinaria:
-                    try:
-                        maquinaria_obj, created = self.MaquinariaEquipo.objects.update_or_create(
-                            pod=pod,
-                            equipo=_truncate(row_data.get("equipo"), 100),
-                            defaults={
-                                'peak': _to_int(row_data.get("peak")),
-                                'proyectado': _to_int(row_data.get("proyectado")),
-                                'total_en_obra': _to_int(row_data.get("total_en_obra")),
-                                'equipos_en_falla': _to_int(row_data.get("equipos_en_falla")),
-                                'equipo_en_mantencion': _to_int(row_data.get("equipo_en_mantencion")),
-                                'operadores_disponibles': _to_int(row_data.get("operadores_disponibles")),
-                                'equipos_operativos': _to_int(row_data.get("equipos_operativos")),
-                                'reserva': _to_int(row_data.get("reserva")),
-                                'observacion': _truncate(row_data.get("observacion"), 200),
-                                'descripcion_falla': _truncate(row_data.get("descripcion_falla"), 500),
-                            }
-                        )
-                        if created:
-                            maquinaria_procesada += 1
-                            total_rows += 1
+                defaults = {
+                    "fecha": _to_date(row_data.get("fecha")) or pod.fecha,
+                    "proyectado_rev2": _to_int(row_data.get("peak") or row_data.get("proyectado")),
+                    "total_obra": _to_int(row_data.get("total_en_obra")),
+                    "en_falla": _to_int(row_data.get("equipos_en_falla")),
+                    "en_mantencion": _to_int(row_data.get("equipo_en_mantencion")),
+                    "operadores_disponibles": _to_int(row_data.get("operadores_disponibles")),
+                    "operativos": _to_int(row_data.get("equipos_operativos")),
+                    "reserva": _to_int(row_data.get("reserva")),
+                    "observacion": _truncate(row_data.get("observacion"), 200),
+                }
 
-                        # 3. Procesar compromisos de maquinaria si existen
-                        compromiso_creado = self._procesar_compromisos(
-                            maquinaria_obj, row_data, warnings
-                        )
-                        if compromiso_creado:
-                            compromisos_procesados += 1
-                            total_rows += 1
-                            
-                    except Exception as e:
-                        equipo = row_data.get('equipo', 'Sin equipo')
-                        warnings.setdefault("maquinaria", []).append(f"'{equipo}': {e}")
+                try:
+                    equipo_obj, created = self.DotacionEquipo.objects.update_or_create(
+                        pod=pod,
+                        descripcion_equipo=descripcion_equipo,
+                        defaults=defaults,
+                    )
+                    if created:
+                        equipos_procesados += 1
+                    total_rows += 1
 
-            # Resumen final
+                    if self._persist_compromiso(equipo_obj, row_data, warnings):
+                        compromisos_procesados += 1
+                        total_rows += 1
+                except Exception as exc:
+                    warnings.setdefault("equipos", []).append(f"{descripcion_equipo}: {exc}")
+
             stats = {
-                "dotacion_procesada": dotacion_procesada,
-                "maquinaria_procesada": maquinaria_procesada,
+                "equipos_procesados": equipos_procesados,
                 "compromisos_procesados": compromisos_procesados,
                 "total_filas": len(flat_rows),
-                "cargos_unicos": len(set(r.get("cargo") for r in flat_rows if r.get("cargo"))),
-                "equipos_unicos": len(set(r.get("equipo") for r in flat_rows if r.get("equipo"))),
             }
-            
+
             if not dry_run:
-                logger.info(f"✅ Dotación y Maquinaria procesada: {dotacion_procesada} dotaciones, {maquinaria_procesada} equipos, {compromisos_procesados} compromisos")
+                logger.info(
+                    "✅ Dotación/Maquinaria: %s equipos, %s compromisos",
+                    equipos_procesados,
+                    compromisos_procesados,
+                )
             else:
-                logger.info(f"🔶 DRY RUN - Dotación y Maquinaria: {len(flat_rows)} filas a procesar")
+                logger.info("🔶 DRY RUN - Dotación/Maquinaria: %s filas", len(flat_rows))
 
             return total_rows, {**warnings, **stats}, None
+        except Exception as exc:
+            logger.exception("Error en persistencia de Dotación y Maquinaria: %s", exc)
+            return 0, warnings, {"persist": str(exc)}
 
-        except Exception as e:
-            logger.exception("Error en persistencia de Dotación y Maquinaria: %s", e)
-            return 0, warnings, {"persist": str(e)}
-
-    def _calcular_total_personal(self, row_data: Dict[str, Any]) -> Optional[int]:
-        """Calcula el total de personal sumando turno A y B"""
-        turno_a = _to_int(row_data.get("turno_a"))
-        turno_b = _to_int(row_data.get("turno_b"))
-        
-        if turno_a is None and turno_b is None:
-            return None
-        
-        total = 0
-        if turno_a is not None:
-            total += turno_a
-        if turno_b is not None:
-            total += turno_b
-            
-        return total if total > 0 else None
-
-    def _procesar_compromisos(self, maquinaria_obj: Any, row_data: Dict[str, Any], warnings: Dict[str, Any]) -> bool:
-        """Procesa los compromisos de equipo y operador"""
-        try:
-            compromiso_equipo = row_data.get("compromiso_equipo")
-            fecha_compromiso_equipo = _to_date(row_data.get("fecha_compromiso_equipo"))
-            compromiso_operador = row_data.get("compromiso_operador")
-            fecha_compromiso_operador = _to_date(row_data.get("fecha_compromiso_operador"))
-            
-            # Solo crear compromiso si hay datos
-            if not any([compromiso_equipo, fecha_compromiso_equipo, compromiso_operador, fecha_compromiso_operador]):
-                return False
-            
-            if self.CompromisoMaquinaria:
-                compromiso_obj, created = self.CompromisoMaquinaria.objects.update_or_create(
-                    maquinaria_equipo=maquinaria_obj,
-                    defaults={
-                        'compromiso_equipo': _truncate(compromiso_equipo, 200),
-                        'fecha_compromiso_equipo': fecha_compromiso_equipo,
-                        'compromiso_operador': _truncate(compromiso_operador, 200),
-                        'fecha_compromiso_operador': fecha_compromiso_operador,
-                    }
-                )
-                return created
-            return False
-            
-        except Exception as e:
-            equipo = row_data.get('equipo', 'Sin equipo')
-            warnings.setdefault("compromisos", []).append(f"'{equipo}': {e}")
+    def _persist_compromiso(
+        self,
+        equipo_obj: Any,
+        row_data: Dict[str, Any],
+        warnings: Dict[str, List[str]],
+    ) -> bool:
+        if not self.EquipoCompromiso or not equipo_obj:
             return False
 
-    def _crear_resumen_dotacion(self, pod: Any, stats: Dict[str, Any]) -> None:
-        """Crea un registro de resumen de dotación y maquinaria"""
+        compromiso_equipo = row_data.get("compromiso_equipo")
+        compromiso_operador = row_data.get("compromiso_operador")
+        fecha_equipo = _to_date(row_data.get("fecha_compromiso_equipo"))
+        fecha_operador = _to_date(row_data.get("fecha_compromiso_operador"))
+        descripcion_falla = row_data.get("descripcion_falla")
+
+        if not any([compromiso_equipo, compromiso_operador, fecha_equipo, fecha_operador, descripcion_falla]):
+            return False
+
         try:
-            from pretdb.models import ResumenDotacionMaquinaria
-            resumen, created = ResumenDotacionMaquinaria.objects.update_or_create(
-                pod=pod,
+            self.EquipoCompromiso.objects.update_or_create(
+                equipo=equipo_obj,
                 defaults={
-                    'total_personal': stats.get("dotacion_procesada", 0),
-                    'total_equipos': stats.get("maquinaria_procesada", 0),
-                    'total_compromisos': stats.get("compromisos_procesados", 0),
-                    'cargos_unicos': stats.get("cargos_unicos", 0),
-                    'equipos_unicos': stats.get("equipos_unicos", 0),
-                }
+                    "descripcion_falla": _truncate(descripcion_falla, 100),
+                    "compromiso_equipo": _truncate(compromiso_equipo, 200),
+                    "fecha_equipo": fecha_equipo,
+                    "compromiso_operador": _truncate(compromiso_operador, 100),
+                    "fecha_operador": fecha_operador,
+                },
             )
-            if created:
-                logger.info(f"✅ Resumen Dotación/Maquinaria creado para POD {pod.numero_pod}")
-        except Exception as e:
-            logger.warning(f"No se pudo crear resumen de Dotación/Maquinaria: {e}")
-
-# Registro en el sistema de loaders
-def register_loader():
-    from etl.registry import register_loader
-    register_loader("dotacion_y_maquinaria")(DotacionMaquinariaLoader)
+            return True
+        except Exception as exc:
+            warnings.setdefault("compromisos", []).append(f"{equipo_obj.descripcion_equipo}: {exc}")
+            return False

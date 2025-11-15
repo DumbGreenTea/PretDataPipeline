@@ -6,6 +6,8 @@ from datetime import datetime, date
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 import pandas as pd
 
+from pretdb.etl.transformers.registry import register_transformer
+
 logger = logging.getLogger(__name__)
 
 # =============================== utilidades ===============================
@@ -140,6 +142,7 @@ def _qdec(val: Optional[float], places: int) -> Optional[Decimal]:
 
 # ============================= clase transformador =============================
 
+@register_transformer("ppc")
 class PPCTransformer:
     """
     Extrae la tabla de PPC (Percent Plan Complete) pivotada por columnas (días)

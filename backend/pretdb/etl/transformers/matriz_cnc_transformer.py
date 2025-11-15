@@ -5,6 +5,8 @@ import logging, re, unicodedata, hashlib
 from datetime import datetime, date
 import pandas as pd
 
+from pretdb.etl.transformers.registry import register_transformer
+
 logger = logging.getLogger(__name__)
 
 # =============================== utilidades ===============================
@@ -135,6 +137,7 @@ HEADER_HINTS: Dict[str, re.Pattern] = {
 
 # ============================= clase transformador =============================
 
+@register_transformer("matriz_cnc")
 class MatrizCNCTransformer:
     """
     Extrae la Matriz de Causas de No Cumplimiento (CNC).

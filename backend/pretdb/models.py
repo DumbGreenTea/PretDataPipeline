@@ -20,10 +20,10 @@ from django.db import models
 # -----------------------------------------------------------------------------
 class Trabajador(models.Model):
     # trabajador_id se crea automáticamente como 'id'
-    codigo_trabajador = models.CharField(max_length=2)
+    codigo_trabajador = models.CharField(max_length=20)
     nombre = models.CharField(max_length=30)
     cargo = models.CharField(max_length=20, blank=True, null=True)
-    empresa = models.CharField(max_length=15, blank=True, null=True)
+    empresa = models.CharField(max_length=50, blank=True, null=True)
     correo = models.EmailField(max_length=30, blank=True, null=True)
 
     class Meta:
@@ -94,8 +94,8 @@ class Contrato(models.Model):
         related_name='contratos'
     )
     
-    nombre_contrato = models.CharField(max_length=60, blank=True, null=True)
-    nombre_codigo = models.CharField(max_length=10, blank=True, null=True)
+    nombre_contrato = models.CharField(max_length=120, blank=True, null=True)
+    nombre_codigo = models.CharField(max_length=20, blank=True, null=True)
 
     class Meta:
         # CONSTRAINT uq_contrato_por_pod UNIQUE (pod_id, nombre_contrato, nombre_codigo);
@@ -152,7 +152,7 @@ class AsistenciaDetalle(models.Model):
     )
     
     fecha = models.DateField()
-    dia_nombre = models.CharField(max_length=8, blank=True, null=True)
+    dia_nombre = models.CharField(max_length=10, blank=True, null=True)
 
     # 0=Ausente, 1=Presente, 2=Reemplazo
     ESTADO_ASISTENCIA = [
@@ -486,8 +486,8 @@ class MonografiaPead(models.Model):
         related_name='monografias_pead'
     )
     nombre_tramo = models.CharField(max_length=100, blank=True, null=True)
-    dm_inicio = models.DecimalField(max_digits=8, decimal_places=2, blank=True, null=True)
-    dm_fin = models.DecimalField(max_digits=8, decimal_places=2, blank=True, null=True)
+    dm_inicio = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    dm_fin = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     ruta_imagen = models.CharField(max_length=100, blank=True, null=True) # O models.ImageField si vas a subir archivos
 
     class Meta:
@@ -531,7 +531,7 @@ class MonografiaPeadActividad(models.Model):
 class MonografiaCruce(models.Model):
     # cruce_id se crea automáticamente como 'id'
     nombre_cruce = models.CharField(max_length=100, blank=True, null=True)
-    dm = models.DecimalField(max_digits=8, decimal_places=2, blank=True, null=True)
+    dm = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     estado = models.CharField(max_length=50, blank=True, null=True)
 
     class Meta:
@@ -668,13 +668,13 @@ class Compromiso(models.Model):
         related_name='compromisos'
     )
     item = models.CharField(max_length=50, blank=True, null=True)
-    descripcion = models.CharField(max_length=100, blank=True, null=True)
+    descripcion = models.TextField(blank=True, null=True)
     fecha_toma_compromiso = models.DateField(blank=True, null=True)
     fecha_cierre_proyectada = models.DateField(blank=True, null=True)
     fecha_cierre_efectiva = models.DateField(blank=True, null=True)
     responsable = models.CharField(max_length=100, blank=True, null=True)
     status = models.CharField(max_length=20, blank=True, null=True)
-    observacion = models.CharField(max_length=200, blank=True, null=True)
+    observacion = models.TextField(blank=True, null=True)
 
     class Meta:
         indexes = [

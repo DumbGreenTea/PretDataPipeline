@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 import pandas as pd
 
 from django.db import transaction, connection
+from pretdb.etl.transformers.registry import register_transformer
 from pretdb.models import (
     Pod,
     PlanAnterior,
@@ -206,6 +207,7 @@ HORARIO_INICIO_TITLE = re.compile(r"horario\s*de\s*inicio\s*(de\s*trabajo)?", re
 
 # ============================= clase transformador =============================
 
+@register_transformer("plan_anterior")
 class PlanAnteriorTransformer:
     """
     Extrae desde 'Plan anterior' y (ahora) persiste según tus modelos.

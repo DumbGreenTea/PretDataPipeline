@@ -2,10 +2,15 @@
 from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 import logging
+import re
 from datetime import date, datetime, time
 from decimal import Decimal
+
+import pandas as pd
 from django.db import transaction
 from django.apps import apps
+
+from pretdb.etl.loaders.registry import register_loader
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +90,7 @@ def _truncate(s: Optional[str], maxlen: int) -> Optional[str]:
     return s[:maxlen] if len(s) > maxlen else s
 
 
+@register_loader("plan_anterior")
 class PlanAnteriorLoader:
     """
     Carga datos de Plan Anterior desde el transformer
@@ -314,8 +320,3 @@ class PlanAnteriorLoader:
         except Exception as e:
             logger.error(f"Error creando actividad holder para horarios: {e}")
             return None
-
-# Registro en el sistema de loaders
-def register_loader():
-    from etl.registry import register_loader
-    register_loader("plan_anterior")(PlanAnteriorLoader)

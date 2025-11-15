@@ -5,6 +5,8 @@ import logging, re, unicodedata, hashlib
 from datetime import datetime, date
 import pandas as pd
 
+from pretdb.etl.transformers.registry import register_transformer
+
 logger = logging.getLogger(__name__)
 
 # =============================== utilidades (transformer) ===============================
@@ -120,6 +122,7 @@ HORARIO_INICIO_TITLE = re.compile(r"horario\s*de\s*inicio\s*(de\s*trabajo)?", re
 
 # ============================= clase transformador =============================
 
+@register_transformer("plan_dia")
 class PlanDiaTransformer:
     sheet_key = "plan_dia"
 

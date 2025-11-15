@@ -3,8 +3,13 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import date, datetime
+from calendar import monthrange
+
+import pandas as pd
 from django.db import transaction
 from django.apps import apps
+
+from pretdb.etl.loaders.registry import register_loader
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +40,7 @@ def _to_date(v) -> Optional[date]:
         return None
 
 
+@register_loader("sso")
 class SsoLoader:
     """
     Carga datos de SSO (Cruz de Seguridad) desde el transformer
@@ -79,12 +85,17 @@ class SsoLoader:
         # Extraer datos del transformer
         summary = out.get("summary", {})
         dias_detail = out.get("dias_detail", [])
-        
         mes = summary.get("mes")
         anio = summary.get("anio")
-        
         if not mes or not anio:
             warnings["datos_incompletos"] = "Faltan mes o año en los datos de SSO"
+            return 0, warnings, None
+
+        try:
+            fecha_inicio = date(anio, mes, 1)
+            _, fecha_fin = _month_bounds(anio, mes)
+        except ValueError as exc:
+            warnings["fechas_invalidas"] = str(exc)
             return 0, warnings, None
 
         # Estadísticas
@@ -104,6 +115,16 @@ class SsoLoader:
                     logger.info(f"✅ SSO creado para POD {pod.numero_pod}")
                 else:
                     logger.debug(f"✅ SSO encontrado para POD {pod.numero_pod}")
+
+            cruz_obj = None
+            if not dry_run and self.SsoCruzSeguridad and sso_obj:
+                cruz_obj, _ = self.SsoCruzSeguridad.objects.update_or_create(
+                    sso=sso_obj,
+                    defaults={
+                        "fecha_inicio": fecha_inicio,
+                        "fecha_fin": fecha_fin,
+                    },
+                )
 
             # 2. Procesar estados de días (cruz de seguridad)
             for dia_data in dias_detail:
@@ -128,14 +149,16 @@ class SsoLoader:
                 
                 # Crear registro de estado del día
                 if sso_obj:
+                    if not self.SsoEstadoDia or not cruz_obj:
+                        continue
                     try:
+                        estado_val = self._estado_to_choice(estado_color)
                         estado_obj, created = self.SsoEstadoDia.objects.update_or_create(
-                            sso=sso_obj,
+                            sso_cruz_seguridad=cruz_obj,
                             fecha=fecha_dia,
                             defaults={
-                                'estado': estado_color,
-                                'color_hex': color_hex,
-                            }
+                                "estado_dia": estado_val,
+                            },
                         )
                         if created:
                             estados_creados += 1
@@ -174,24 +197,6 @@ class SsoLoader:
                     except Exception as e:
                         warnings["reflexion"] = f"No se pudo crear reflexión: {e}"
 
-            # 4. Crear registro de cruz de seguridad (resumen mensual)
-            if not dry_run and sso_obj:
-                try:
-                    cruz_obj, created = self.SsoCruzSeguridad.objects.update_or_create(
-                        sso=sso_obj,
-                        mes=mes,
-                        anio=anio,
-                        defaults={
-                            'total_dias': len(dias_detail),
-                            'dias_con_estado': summary.get("n_dias_con_estado", 0),
-                        }
-                    )
-                    if created:
-                        total_rows += 1
-                        logger.info(f"✅ Cruz de seguridad creada para {mes}/{anio}")
-                except Exception as e:
-                    warnings["cruz_seguridad"] = f"No se pudo crear cruz de seguridad: {e}"
-
             # Resumen final
             stats = {
                 "dias_procesados": dias_procesados,
@@ -224,7 +229,20 @@ class SsoLoader:
             logger.warning(f"Fecha inválida {dia_num}/{mes}/{anio}: {e}")
             return None
 
-# Registro en el sistema de loaders
-def register_loader():
-    from etl.registry import register_loader
-    register_loader("sso")(SsoLoader)
+    def _estado_to_choice(self, estado: Optional[str]) -> Optional[int]:
+        if estado is None:
+            return None
+        normalized = str(estado).strip().lower()
+        if normalized.startswith("verd"):
+            return 0
+        if normalized.startswith("amar"):
+            return 1
+        if normalized.startswith("roj"):
+            return 2
+        return None
+def _month_bounds(year: int, month: int) -> Tuple[date, date]:
+    """Devuelve el primer y último día del mes dado."""
+    first = date(year, month, 1)
+    last_day = monthrange(year, month)[1]
+    last = date(year, month, last_day)
+    return first, last

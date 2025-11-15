@@ -8,6 +8,8 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles.colors import COLOR_INDEX
 
+from pretdb.etl.transformers.registry import register_transformer
+
 from django.db import transaction, connection
 from pretdb.models import Pod, Sso, SsoCruzSeguridad, SsoEstadoDia, SsoReflexion
 
@@ -292,6 +294,7 @@ def _month_bounds(y: int, m: int) -> Tuple[date, date]:
 
 # ----------------------------- clase principal -----------------------------
 
+@register_transformer("sso")
 class SSOTransformer:
     """
     Transformer para SSO (Cruz de Seguridad + Hallazgos/Tarjeta/Policlínico).

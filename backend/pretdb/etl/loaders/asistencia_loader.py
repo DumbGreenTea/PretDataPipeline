@@ -36,56 +36,73 @@ def _to_date(v) -> Optional[date]:
     except Exception:
         return None
 
-def _get_or_create_trabajador(nombre: str, codigo: str, empresa: str, Trabajador_model, Contratista_model):
-    """Busca o crea un Trabajador por nombre y código"""
+def _get_or_create_trabajador(
+    nombre: str,
+    codigo: Optional[str],
+    empresa: Optional[str],
+    Trabajador_model,
+    Contratista_model,
+):
+    """Busca o crea un Trabajador usando los campos reales del modelo."""
     if not nombre or not Trabajador_model:
         return None
-    
+
     nombre_limpio = nombre.strip()
     codigo_limpio = codigo.strip() if codigo else None
-    
+    empresa_limpia = (empresa or "").strip() or None
+
     if not nombre_limpio:
         return None
-    
+
     try:
-        # Buscar por código primero (si existe)
         if codigo_limpio:
-            try:
-                trabajador = Trabajador_model.objects.get(codigo=codigo_limpio)
-                logger.debug(f"✅ Trabajador encontrado por código: {codigo_limpio} - {nombre_limpio}")
+            query = {"codigo_trabajador": codigo_limpio}
+            if empresa_limpia:
+                query["empresa"] = empresa_limpia
+            trabajador = Trabajador_model.objects.filter(**query).first()
+            if trabajador:
+                logger.debug(
+                    "✅ Trabajador encontrado por código %s (%s)",
+                    codigo_limpio,
+                    nombre_limpio,
+                )
                 return trabajador
-            except Trabajador_model.DoesNotExist:
-                pass
-        
-        # Buscar por nombre
-        if codigo_limpio:
-            trabajador, created = Trabajador_model.objects.get_or_create(
-                codigo=codigo_limpio,
-                defaults={
-                    'nombre': nombre_limpio,
-                    'empresa': empresa
-                }
+
+            defaults = {"nombre": nombre_limpio}
+            if empresa_limpia is not None:
+                defaults["empresa"] = empresa_limpia
+
+            trabajador = Trabajador_model.objects.create(
+                codigo_trabajador=codigo_limpio,
+                **defaults,
             )
+            logger.info("✅ Trabajador creado: %s (%s)", nombre_limpio, codigo_limpio)
+            return trabajador
+
+        # Sin código no podemos crear (campo requerido). Intentamos buscar por nombre.
+        trabajador = Trabajador_model.objects.filter(nombre=nombre_limpio).first()
+        if trabajador:
+            logger.debug("✅ Trabajador encontrado por nombre: %s", nombre_limpio)
         else:
-            # Si no hay código, buscar solo por nombre
-            trabajador, created = Trabajador_model.objects.get_or_create(
-                nombre=nombre_limpio,
-                defaults={'empresa': empresa}
+            logger.warning(
+                "No se puede crear trabajador sin código: %s (empresa=%s)",
+                nombre_limpio,
+                empresa_limpia or "N/D",
             )
-        
-        if created:
-            logger.info(f"✅ Trabajador creado: {nombre_limpio} ({codigo_limpio})")
-        else:
-            logger.debug(f"✅ Trabajador encontrado: {nombre_limpio}")
-        
         return trabajador
-        
+
     except Exception as e:
-        logger.error(f"❌ Error creando/buscando trabajador {nombre_limpio}: {e}")
+        logger.error("❌ Error creando/buscando trabajador %s: %s", nombre_limpio, e)
         return None
 
 
-@register_loader("asistencia")
+def _truncate(value: Optional[str], maxlen: int) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    return text[:maxlen] if len(text) > maxlen else text
+
+
 @register_loader("asistencia")
 class AsistenciaLoader:
     """
@@ -143,7 +160,7 @@ class AsistenciaLoader:
         # Buscar o crear contrato si existe la información
         contrato_obj = None
         if contrato_data and self.Contrato:
-            contrato_obj = self._get_or_create_contrato(contrato_data)
+            contrato_obj = self._get_or_create_contrato(pod, contrato_data)
 
         # Estadísticas
         total_rows = 0
@@ -169,7 +186,6 @@ class AsistenciaLoader:
                                 trabajador=trabajador,
                                 fecha=fecha,
                                 horas=horas,
-                                contrato=contrato_obj,
                                 dry_run=dry_run
                             )
                             if rows_created:
@@ -181,7 +197,6 @@ class AsistenciaLoader:
             stats["trabajadores_procesados"] = trabajadores_procesados
             stats["registros_asistencia_creados"] = registros_asistencia_creados
             stats["dias_procesados"] = len(dates_map)
-            stats["contrato_asociado"] = bool(contrato_obj)
             stats["warnings"] = self._flatten_warnings(warnings)
 
             if not dry_run:
@@ -199,30 +214,43 @@ class AsistenciaLoader:
             stats["error"] = str(e)
             return stats
 
-    def _get_or_create_contrato(self, contrato_data: Dict[str, Any]) -> Optional[Any]:
+    def _get_or_create_contrato(self, pod: Any, contrato_data: Dict[str, Any]) -> Optional[Any]:
         """Busca o crea un contrato basado en los datos del transformer"""
-        if not self.Contrato:
+        if not self.Contrato or not pod:
             return None
             
         contrato_num = contrato_data.get("numero")
         contrato_nombre = contrato_data.get("nombre")
+        codigo_limpio = _truncate(str(contrato_num).strip(), 20) if contrato_num else None
+        nombre_limpio = _truncate((contrato_nombre or "").strip(), 120) or None
         
-        if not contrato_num and not contrato_nombre:
+        if not codigo_limpio and not nombre_limpio:
             return None
             
         try:
-            if contrato_num:
-                contrato, created = self.Contrato.objects.get_or_create(
-                    codigo=contrato_num,
-                    defaults={'nombre': contrato_nombre or f"Contrato {contrato_num}"}
-                )
-            else:
-                contrato, created = self.Contrato.objects.get_or_create(
-                    nombre=contrato_nombre
-                )
-                
+            filters = {"pod": pod}
+            if codigo_limpio:
+                filters["nombre_codigo"] = codigo_limpio
+            if nombre_limpio:
+                filters["nombre_contrato"] = nombre_limpio
+
+            defaults = {}
+            if codigo_limpio:
+                defaults["nombre_codigo"] = codigo_limpio
+            if nombre_limpio or codigo_limpio:
+                defaults["nombre_contrato"] = nombre_limpio or (f"Contrato {codigo_limpio}" if codigo_limpio else None)
+
+            contrato, created = self.Contrato.objects.get_or_create(
+                **filters,
+                defaults=defaults,
+            )
+
             if created:
-                logger.info(f"✅ Contrato creado: {contrato.codigo or contrato.nombre}")
+                logger.info(
+                    "✅ Contrato creado: %s / %s",
+                    contrato.nombre_codigo or "sin código",
+                    contrato.nombre_contrato or "sin nombre",
+                )
             return contrato
             
         except Exception as e:
@@ -250,7 +278,19 @@ class AsistenciaLoader:
         
         if not trabajador:
             warnings.setdefault("trabajador_no_creado", []).append(f"{nombre} ({codigo})")
-            
+            return None
+
+        # Actualizar metadata básica si cambió
+        updated = False
+        if cargo and getattr(trabajador, "cargo", None) != cargo:
+            trabajador.cargo = _truncate(cargo, 20)
+            updated = True
+        if empresa and getattr(trabajador, "empresa", None) != empresa:
+            trabajador.empresa = _truncate(empresa, 50)
+            updated = True
+        if updated:
+            trabajador.save(update_fields=["cargo", "empresa"])
+
         return trabajador
 
     def _process_asistencia_dia(
@@ -259,7 +299,6 @@ class AsistenciaLoader:
         trabajador: Any, 
         fecha: date, 
         horas: float, 
-        contrato: Optional[Any] = None,
         dry_run: bool = False
     ) -> int:
         """Procesa un registro de asistencia para un día específico"""
@@ -269,37 +308,23 @@ class AsistenciaLoader:
             return 1
             
         try:
-            # Buscar o crear registro de asistencia principal
-            asistencia, created = self.Asistencia.objects.get_or_create(
+            if not self.Asistencia or not self.AsistenciaDetalle:
+                return 0
+
+            asistencia, _ = self.Asistencia.objects.get_or_create(
                 pod=pod,
                 trabajador=trabajador,
-                fecha=fecha,
-                defaults={
-                    'horas_trabajadas': horas,
-                    'contrato': contrato
-                }
             )
-            
-            if not created:
-                # Actualizar horas si el registro ya existe
-                asistencia.horas_trabajadas = horas
-                if contrato:
-                    asistencia.contrato = contrato
-                asistencia.save()
-            
-            # Crear detalle de asistencia
-            detalle, det_created = self.AsistenciaDetalle.objects.get_or_create(
+
+            defaults = {
+                "dia_nombre": fecha.strftime("%A"),
+                "presente": self._estado_from_horas(horas),
+            }
+            detalle, _ = self.AsistenciaDetalle.objects.update_or_create(
                 asistencia=asistencia,
-                defaults={
-                    'horas_registradas': horas,
-                    'estado': 'PRESENTE' if horas > 0 else 'AUSENTE'
-                }
+                fecha=fecha,
+                defaults=defaults,
             )
-            
-            if not det_created:
-                detalle.horas_registradas = horas
-                detalle.estado = 'PRESENTE' if horas > 0 else 'AUSENTE'
-                detalle.save()
                 
             return 1
             
@@ -316,7 +341,6 @@ class AsistenciaLoader:
             "trabajadores_procesados": 0,
             "registros_asistencia_creados": 0,
             "dias_procesados": len(dates_map or {}),
-            "contrato_asociado": False,
             "warnings": [],
             "skipped": 0,
         }
@@ -330,3 +354,14 @@ class AsistenciaLoader:
             else:
                 flat.append(f"{key}: {value}")
         return flat
+
+    def _estado_from_horas(self, horas: Any) -> Optional[int]:
+        if horas is None:
+            return None
+        try:
+            cantidad = float(horas)
+        except (TypeError, ValueError):
+            return None
+        if cantidad <= 0:
+            return 0
+        return 1

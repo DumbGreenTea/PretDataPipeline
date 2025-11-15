@@ -6,6 +6,8 @@ from datetime import datetime, date
 import pandas as pd
 import numpy as np
 
+from pretdb.etl.transformers.registry import register_transformer
+
 logger = logging.getLogger(__name__)
 
 # ------------------------------- utilidades -------------------------------
@@ -70,6 +72,7 @@ def _row_id(categoria: Optional[str], item: int, descripcion: str) -> str:
 
 # ------------------------------ clase principal ------------------------------
 
+@register_transformer("compromisos")
 class CompromisosTransformer:
     """
     Extrae compromisos desde la hoja 'Compromisos' en sus variantes

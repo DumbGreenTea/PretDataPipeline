@@ -1,3 +1,4 @@
+# pretdb/etl/loaders/portada_loader.py - VERSIÓN CORREGIDA
 from __future__ import annotations
 from typing import Dict, Any, Optional
 import logging
@@ -5,21 +6,15 @@ from datetime import date, datetime
 from django.db import transaction, connection
 from django.apps import apps
 
+from pretdb.etl.loaders.registry import register_loader
+
 logger = logging.getLogger(__name__)
 
-def _get_model(app_label: str, *names: str):
-    for name in names:
-        try:
-            return apps.get_model(app_label, name)
-        except LookupError:
-            continue
-    return None
-
-def _has_field(model, name: str) -> bool:
+def _get_model(app_label: str, model_name: str):
     try:
-        return any(getattr(f, "name", None) == name for f in model._meta.get_fields())
-    except Exception:
-        return False
+        return apps.get_model(app_label, model_name)
+    except LookupError:
+        return None
 
 def _pick(d: Dict[str, Any], *keys: str, default=None):
     for k in keys:
@@ -41,44 +36,66 @@ def _to_date(v) -> Optional[date]:
     except Exception:
         return None
 
-def _assign_defaults(model, source: Dict[str, Any], mapping: Dict[str, list[str]]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    for dest, srcs in mapping.items():
-        if not _has_field(model, dest):
-            continue
-        val = _pick(source, *srcs)
-        if dest == "fecha":
-            val = _to_date(val)
-        if val is not None:
-            out[dest] = val
-    return out
+def _get_or_create_trabajador(nombre: str, Trabajador_model):
+    """Busca o crea un Trabajador por nombre"""
+    if not nombre or not Trabajador_model:
+        return None
+    
+    nombre_limpio = nombre.strip()
+    if not nombre_limpio:
+        return None
+    
+    try:
+        # Buscar por nombre
+        trabajador, created = Trabajador_model.objects.get_or_create(
+            nombre=nombre_limpio,
+            defaults={'nombre': nombre_limpio}
+        )
+        if created:
+            logger.info(f"✅ Trabajador creado: {nombre_limpio}")
+        else:
+            logger.debug(f"✅ Trabajador encontrado: {nombre_limpio}")
+        return trabajador
+    except Exception as e:
+        logger.error(f"❌ Error creando trabajador {nombre_limpio}: {e}")
+        return None
 
+@register_loader("portada")
 class PortadaLoader:
-    """Crea/actualiza Pod y (si existen modelos) enlaza Contrato y Contratista."""
     def __init__(self) -> None:
         pretdb = "pretdb"
         self.Pod = _get_model(pretdb, "Pod")
-        self.Contrato = _get_model(pretdb, "Contrato", "ContratoObra")
-        self.Contratista = _get_model(pretdb, "Contratista", "Empresa", "Proveedor")
-
-        self.pod_num_field = self.Pod and next((f for f in ["numero_pod","nro_pod","pod_numero","pod_nro","numero"]
-                                                if _has_field(self.Pod, f)), None)
-        self.pod_fecha_field = self.Pod and ("fecha" if _has_field(self.Pod, "fecha") else None)
-        self.pod_contrato_fk = self.Pod and next((f for f in ["contrato","contrato_id"] if _has_field(self.Pod, f)), None)
-        self.pod_contratista_fk = self.Pod and next((f for f in ["contratista","empresa"] if _has_field(self.Pod, f)), None)
+        self.Trabajador = _get_model(pretdb, "Trabajador")
 
     @transaction.atomic
-    def persist(self, out: dict, *, dry_run: bool = False, run_id: Optional[int] = None) -> Dict[str, Any]:
-        stats = {"mode": "dry" if dry_run else "write","pod_id": None,"created": False,"updated": False,
-                 "linked_contrato": False,"linked_contratista": False,"etl_run_updated": False,"skipped": 0,"warnings": []}
+    def persist(
+        self,
+        pod,  # se ignora, pero se deja para compatibilidad
+        out: dict,
+        *,
+        dry_run: bool = False,
+        run_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        stats: Dict[str, Any] = {
+            "mode": "dry" if dry_run else "write",
+            "pod_id": None,
+            "pod_obj": None,
+            "numero_pod": None,
+            "created": False,
+            "updated": False,
+            "skipped": 0,
+            "warnings": [],
+        }
 
         if not self.Pod:
             stats["warnings"].append("Modelo Pod no encontrado.")
             stats["skipped"] = 1
             return stats
 
-        rows = out.get("flat_rows") or out.get("flat") or []
-        if isinstance(rows, dict): rows = [rows]
+        rows = out.get("flat_rows") or []
+        if isinstance(rows, dict):
+            rows = [rows]
+
         if not rows:
             stats["warnings"].append("PortadaLoader: flat_rows vacío.")
             stats["skipped"] = 1
@@ -86,84 +103,90 @@ class PortadaLoader:
 
         src = rows[0]
 
-        fecha_val = _to_date(_pick(src, "fecha", "fecha_pod", "dia"))
-        nro_val   = _pick(src, "nro_pod", "numero_pod", "pod", "pod_numero", "n_pod")
-        contrato_codigo   = _pick(src, "contrato", "codigo_contrato", "contrato_codigo", "id_contrato")
-        contrato_nombre   = _pick(src, "contrato_nombre", "obra", "obra_nombre", "faena", "proyecto")
-        contratista_nombre= _pick(src, "contratista", "empresa", "razon_social")
+        # Extraer datos
+        fecha_val = _to_date(_pick(src, "fecha"))
+        nro_val = _pick(src, "pod_numero")
+        turno_val = _pick(src, "turno")
+        inicio_periodo_val = _to_date(_pick(src, "inicio_periodo_pod"))
+        fin_periodo_val = _to_date(_pick(src, "termino_periodo_pod"))
+        jefe_codelco_nombre = _pick(src, "jefe_turno_codelco")
+        jefe_contratista_nombre = _pick(src, "jefe_turno_contratista")
 
-        key_kwargs = {}
-        if self.pod_fecha_field and fecha_val: key_kwargs[self.pod_fecha_field] = fecha_val
-        if self.pod_num_field and nro_val not in (None, ""): key_kwargs[self.pod_num_field] = nro_val
-        if not key_kwargs:
-            stats["warnings"].append("No hay clave natural (fecha/numero_pod) para upsert; se omite.")
+        # Validar campos obligatorios
+        if not nro_val:
+            stats["warnings"].append("Falta pod_numero")
             stats["skipped"] = 1
             return stats
 
-        extras_map = {
-            "proyecto": ["proyecto", "faena", "obra"],
-            "turno": ["turno", "jornada"],
-            "clima": ["clima", "meteorologia", "meteorología"],
-            "superintendente": ["superintendente", "jefe_turno", "responsable"],
-            "ubicacion": ["ubicacion", "ubicación", "locacion", "localizacion", "localización"],
+        if not fecha_val:
+            stats["warnings"].append("Falta fecha")
+            stats["skipped"] = 1
+            return stats
+
+        # ✅ CREAR TRABAJADORES ANTES de asignarlos al POD
+        jefe_codelco_obj = None
+        jefe_contratista_obj = None
+        
+        if jefe_codelco_nombre and self.Trabajador:
+            jefe_codelco_obj = _get_or_create_trabajador(jefe_codelco_nombre, self.Trabajador)
+            if not jefe_codelco_obj:
+                stats["warnings"].append(f"No se pudo crear trabajador: {jefe_codelco_nombre}")
+        
+        if jefe_contratista_nombre and self.Trabajador:
+            jefe_contratista_obj = _get_or_create_trabajador(jefe_contratista_nombre, self.Trabajador)
+            if not jefe_contratista_obj:
+                stats["warnings"].append(f"No se pudo crear trabajador: {jefe_contratista_nombre}")
+
+        # Preparar datos para Pod
+        key_kwargs = {"numero_pod": nro_val}
+        defaults = {
+            "fecha": fecha_val,
+            "turno": turno_val,
+            "inicio_periodo": inicio_periodo_val,
+            "fin_periodo": fin_periodo_val,
+            # ✅ Ahora SÍ son objetos Trabajador
+            "jefe_turno_codelco": jefe_codelco_obj,
+            "jefe_turno_contratista": jefe_contratista_obj,
         }
-        defaults = _assign_defaults(self.Pod, src, {k:v for k,v in extras_map.items() if _has_field(self.Pod, k)})
 
-        contrato_obj = None
-        contratista_obj = None
-
-        if self.Contratista and contratista_nombre:
-            name_field = next((f for f in ["nombre","razon_social","descripcion"] if _has_field(self.Contratista, f)), None)
-            if name_field:
-                try:
-                    contratista_obj, _ = self.Contratista.objects.get_or_create(**{name_field: contratista_nombre})
-                    stats["linked_contratista"] = True
-                except Exception as e:
-                    stats["warnings"].append(f"No se pudo upsert Contratista: {e}")
-
-        if self.Contrato and (contrato_codigo or contrato_nombre):
-            code_field = next((f for f in ["codigo","nro","identificador"] if _has_field(self.Contrato, f)), None)
-            name_field = next((f for f in ["nombre","descripcion","obra","proyecto"] if _has_field(self.Contrato, f)), None)
-            fk_contratista = next((f for f in ["contratista","empresa","proveedor"] if _has_field(self.Contrato, f)), None)
-            try:
-                query = {}
-                if code_field and contrato_codigo: query[code_field] = contrato_codigo
-                elif name_field and contrato_nombre: query[name_field] = contrato_nombre
-                if query:
-                    defaults_contrato = {}
-                    if code_field in query and name_field and contrato_nombre:
-                        defaults_contrato[name_field] = contrato_nombre
-                    if fk_contratista and contratista_obj:
-                        defaults_contrato[fk_contratista] = contratista_obj
-                    contrato_obj, _ = self.Contrato.objects.update_or_create(defaults=defaults_contrato, **query)
-                    stats["linked_contrato"] = True
-            except Exception as e:
-                stats["warnings"].append(f"No se pudo upsert Contrato: {e}")
-
-        if self.pod_contrato_fk and contrato_obj is not None:
-            defaults[self.pod_contrato_fk] = contrato_obj
-        if self.pod_contratista_fk and contratista_obj is not None:
-            defaults[self.pod_contratista_fk] = contratista_obj
+        # Remover valores None
+        defaults = {k: v for k, v in defaults.items() if v is not None}
 
         try:
             if dry_run:
                 stats["created"] = True
+                stats["numero_pod"] = nro_val
+                stats["pod_data"] = {"key": key_kwargs, "defaults": defaults}
+                logger.info(f"🔶 DRY RUN - Pod: {nro_val} - {fecha_val}")
             else:
-                pod_obj, created = self.Pod.objects.update_or_create(defaults=defaults, **key_kwargs)
+                # ⭐⭐ CREAR O ACTUALIZAR EL POD ⭐⭐
+                pod_obj, created = self.Pod.objects.update_or_create(
+                    defaults=defaults,
+                    **key_kwargs,
+                )
                 stats["pod_id"] = pod_obj.id
+                stats["pod_obj"] = str(pod_obj)
+                stats["numero_pod"] = getattr(pod_obj, "numero_pod", nro_val)
                 stats["created"] = bool(created)
                 stats["updated"] = not created
+
+                logger.info(f"✅ {'Creado' if created else 'Actualizado'} POD: {pod_obj}")
+
                 if run_id is not None:
                     try:
                         with connection.cursor() as cur:
-                            cur.execute("UPDATE etl_run SET pod_id=%s WHERE id=%s", [pod_obj.id, run_id])
+                            cur.execute(
+                                "UPDATE etl_run SET pod_id=%s WHERE id=%s",
+                                [pod_obj.id, run_id],
+                            )
                             if cur.rowcount > 0:
                                 stats["etl_run_updated"] = True
                     except Exception as e:
                         stats["warnings"].append(f"No se pudo actualizar etl_run.pod_id: {e}")
+
         except Exception as e:
             logger.exception("Error upsert Pod: %s", e)
             stats["warnings"].append(str(e))
-            stats["skipped"] += 1
+            stats["skipped"] = 1
 
         return stats

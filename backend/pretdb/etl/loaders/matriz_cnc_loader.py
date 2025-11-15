@@ -1,116 +1,242 @@
+# pretdb/etl/loaders/matriz_cnc_loader.py
 from __future__ import annotations
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import logging
+from django.db import transaction
+from django.apps import apps
 
 logger = logging.getLogger(__name__)
+
+def _get_model(app_label: str, model_name: str):
+    try:
+        return apps.get_model(app_label, model_name)
+    except LookupError:
+        return None
+
+def _pick(d: Dict[str, Any], *keys: str, default=None):
+    for k in keys:
+        if k in d and d[k] not in (None, "", "<NA>"):
+            return d[k]
+    return default
+
+def _truncate(s: Optional[str], maxlen: int) -> Optional[str]:
+    if s is None:
+        return None
+    s = str(s)
+    return s[:maxlen] if len(s) > maxlen else s
+
+def _norm_code_id(txt: Optional[str]) -> Optional[str]:
+    """Normaliza códigos '1,1' / '1-1' -> '1.1'"""
+    if not txt:
+        return None
+    s = str(txt).strip()
+    # Si es algo tipo RC03, mantener
+    if len(s) <= 10 and any(c.isalpha() for c in s):
+        return s.upper()
+    # Reemplazar separadores por '.'
+    s = s.replace(",", ".").replace("-", ".")
+    # Compactar múltiples puntos
+    s = re.sub(r"\.+", ".", s)
+    return s
 
 
 class MatrizCNCLoader:
     """
-    Loader para persistir la Matriz CNC (Primaria -> Secundarias).
-    API: persist(pod, transformed, dry_run=False) -> stats dict
+    Carga datos de Matriz CNC desde el transformer
     """
+    
+    def __init__(self) -> None:
+        pretdb = "pretdb"
+        self.Pod = _get_model(pretdb, "Pod")
+        self.CausaPrimaria = _get_model(pretdb, "CausaPrimaria")
+        self.CausaSecundaria = _get_model(pretdb, "CausaSecundaria")
+        self.MatrizCNC = _get_model(pretdb, "MatrizCNC")
 
-    def persist(self, pod: Optional[Any], transformed: Dict[str, Any], dry_run: bool = False) -> Dict[str, int]:
-        rows = transformed.get("flat_rows", []) or []
-        if not rows:
-            logger.info("MatrizCNCLoader: no hay filas para persistir.")
-            return {"created": 0, "updated": 0, "skipped": 0}
+    @transaction.atomic
+    def persist(
+        self,
+        pod,  # Objeto Pod ya creado desde portada
+        out: dict,
+        *,
+        dry_run: bool = False,
+        run_id: Optional[int] = None,
+    ) -> Tuple[int, Dict[str, Any], Optional[Dict[str, Any]]]:
+        """
+        Persiste los datos de Matriz CNC
+        
+        Returns:
+            Tuple[int, Dict, Optional[Dict]]: (rows_upserted, warnings, errors)
+        """
+        warnings = {}
+        errors = None
+        
+        if not self.Pod or not self.MatrizCNC:
+            error_msg = "Modelos Pod o MatrizCNC no encontrados"
+            logger.error(error_msg)
+            return 0, {}, {"models": error_msg}
+
+        if not pod or not isinstance(pod, self.Pod):
+            error_msg = "Pod no proporcionado o inválido"
+            logger.error(error_msg)
+            return 0, {}, {"pod": error_msg}
+
+        # Extraer datos del transformer
+        flat_rows = out.get("flat_rows", [])
+        summary = out.get("summary", {})
+        
+        if not flat_rows:
+            warnings["sin_datos"] = "No hay datos de Matriz CNC para procesar"
+            return 0, warnings, None
+
+        # Estadísticas
+        total_rows = 0
+        causas_primarias_procesadas = 0
+        causas_secundarias_procesadas = 0
+        relaciones_procesadas = 0
 
         try:
-            from pretdb import models as mdl
-        except Exception:
-            logger.warning("MatrizCNCLoader: no se pudo importar pretdb.models; se omite persistencia.")
-            return {"created": 0, "updated": 0, "skipped": len(rows)}
+            # Diccionarios para cache de objetos creados
+            primarias_cache = {}
+            secundarias_cache = {}
 
-        # Resolver modelos (nombres flexibles)
-        PrimModel = (
-            getattr(mdl, "CausaPrimaria", None)
-            or getattr(mdl, "CNCPrimaria", None)
-            or getattr(mdl, "MatrizCNCPrimaria", None)
-        )
-        SecModel = (
-            getattr(mdl, "CausaSecundaria", None)
-            or getattr(mdl, "CNCSubcausa", None)
-            or getattr(mdl, "MatrizCNCSecundaria", None)
-        )
+            for row_data in flat_rows:
+                # Obtener y normalizar IDs
+                causa_primaria_id = _norm_code_id(row_data.get("causa_primaria_id"))
+                causa_primaria_desc = _truncate(row_data.get("causa_primaria_desc"), 200)
+                causa_secundaria_id = _norm_code_id(row_data.get("causa_secundaria_id"))
+                causa_secundaria_desc = _truncate(row_data.get("causa_secundaria_desc"), 200)
 
-        if PrimModel is None or SecModel is None:
-            logger.info("MatrizCNCLoader: no se encontraron modelos Primaria/Secundaria; se omite persistencia.")
-            return {"created": 0, "updated": 0, "skipped": len(rows)}
-
-        prim_cache: Dict[str, Any] = {}
-        created_sec, updated_sec, skipped = 0, 0, 0
-
-        # Si dry_run, no hacemos writes; devolvemos conteos estimados
-        if dry_run:
-            # contar filas válidas
-            valid = 0
-            for row in rows:
-                cod_sec = row.get("causa_secundaria_id")
-                desc_sec = row.get("causa_secundaria_desc")
-                if (cod_sec is None or str(cod_sec).strip() == "") and (desc_sec is None or str(desc_sec).strip() == ""):
-                    continue
-                valid += 1
-            logger.info("MatrizCNCLoader: dry_run -> filas válidas=%s", valid)
-            return {"created": 0, "updated": 0, "skipped": len(rows) - valid}
-
-        # Persistencia real
-        try:
-            from django.db import transaction
-        except Exception:
-            transaction = None
-
-        if transaction is not None:
-            tx_ctx = transaction.atomic()
-        else:
-            class _DummyCtx:
-                def __enter__(self):
-                    return None
-                def __exit__(self, *args):
-                    return False
-            tx_ctx = _DummyCtx()
-
-        with tx_ctx:
-            for row in rows:
-                cod_prim = row.get("causa_primaria_id")
-                desc_prim = row.get("causa_primaria_desc")
-                cod_sec = row.get("causa_secundaria_id")
-                desc_sec = row.get("causa_secundaria_desc")
-
-                if (cod_sec is None or str(cod_sec).strip() == "") and (desc_sec is None or str(desc_sec).strip() == ""):
-                    skipped += 1
+                if dry_run:
+                    logger.debug(f"🔶 DRY RUN - CNC: Primaria {causa_primaria_id} -> Secundaria {causa_secundaria_id}")
                     continue
 
-                key = (str(cod_prim or "").upper().strip())
-                prim_obj = prim_cache.get(key)
-                if prim_obj is None:
-                    defaults = {"descripcion": desc_prim} if desc_prim is not None else {}
+                # 1. Procesar causa primaria
+                causa_primaria_obj = None
+                if causa_primaria_id or causa_primaria_desc:
                     try:
-                        prim_obj, _ = PrimModel.objects.update_or_create(codigo=cod_prim, defaults=defaults)
-                    except Exception:
-                        # Intentar sin campo 'codigo' - último recurso: crear/obtener por descripción
-                        try:
-                            prim_obj, _ = PrimModel.objects.update_or_create(descripcion=desc_prim, defaults={})
-                        except Exception as e:
-                            logger.warning("MatrizCNCLoader: fallo creando primaria (%s/%s): %s", cod_prim, desc_prim, e)
-                            skipped += 1
-                            continue
-                    prim_cache[key] = prim_obj
+                        # Usar cache para evitar duplicados
+                        cache_key = f"{causa_primaria_id}_{causa_primaria_desc}"
+                        if cache_key not in primarias_cache:
+                            if self.CausaPrimaria:
+                                causa_primaria_obj, created = self.CausaPrimaria.objects.update_or_create(
+                                    codigo=causa_primaria_id,
+                                    defaults={
+                                        'descripcion': causa_primaria_desc,
+                                    }
+                                )
+                            else:
+                                # Si no existe el modelo CausaPrimaria, crear directamente en MatrizCNC
+                                causa_primaria_obj = None
+                            primarias_cache[cache_key] = causa_primaria_obj
+                            if created:
+                                causas_primarias_procesadas += 1
+                                total_rows += 1
+                        else:
+                            causa_primaria_obj = primarias_cache[cache_key]
+                    except Exception as e:
+                        warnings.setdefault("causas_primarias", []).append(
+                            f"'{causa_primaria_id}': {e}"
+                        )
 
+                # 2. Procesar causa secundaria
+                causa_secundaria_obj = None
+                if causa_secundaria_id or causa_secundaria_desc:
+                    try:
+                        cache_key = f"{causa_secundaria_id}_{causa_secundaria_desc}"
+                        if cache_key not in secundarias_cache:
+                            if self.CausaSecundaria:
+                                causa_secundaria_obj, created = self.CausaSecundaria.objects.update_or_create(
+                                    codigo=causa_secundaria_id,
+                                    defaults={
+                                        'descripcion': causa_secundaria_desc,
+                                    }
+                                )
+                            else:
+                                # Si no existe el modelo CausaSecundaria, crear directamente en MatrizCNC
+                                causa_secundaria_obj = None
+                            secundarias_cache[cache_key] = causa_secundaria_obj
+                            if created:
+                                causas_secundarias_procesadas += 1
+                                total_rows += 1
+                        else:
+                            causa_secundaria_obj = secundarias_cache[cache_key]
+                    except Exception as e:
+                        warnings.setdefault("causas_secundarias", []).append(
+                            f"'{causa_secundaria_id}': {e}"
+                        )
+
+                # 3. Crear relación en Matriz CNC
                 try:
-                    obj, was_created = SecModel.objects.update_or_create(
-                        primaria=prim_obj,
-                        codigo=cod_sec,
-                        defaults={"descripcion": desc_sec}
-                    )
-                    if was_created:
-                        created_sec += 1
+                    # Determinar clave única para la relación
+                    if causa_primaria_obj and causa_secundaria_obj:
+                        # Si tenemos ambos objetos, usar FKs
+                        matriz_obj, created = self.MatrizCNC.objects.update_or_create(
+                            pod=pod,
+                            causa_primaria=causa_primaria_obj,
+                            causa_secundaria=causa_secundaria_obj,
+                            defaults={}  # No hay campos adicionales por ahora
+                        )
                     else:
-                        updated_sec += 1
+                        # Si no tenemos modelos separados, usar campos directos
+                        matriz_obj, created = self.MatrizCNC.objects.update_or_create(
+                            pod=pod,
+                            causa_primaria_codigo=causa_primaria_id,
+                            causa_primaria_desc=causa_primaria_desc,
+                            causa_secundaria_codigo=causa_secundaria_id,
+                            causa_secundaria_desc=causa_secundaria_desc,
+                            defaults={}
+                        )
+                    
+                    if created:
+                        relaciones_procesadas += 1
+                        total_rows += 1
+                        
                 except Exception as e:
-                    logger.warning("MatrizCNCLoader: fallo guardando sec (%s/%s): %s", cod_sec, desc_sec, e)
-                    skipped += 1
+                    prim_id = causa_primaria_id or "Sin ID"
+                    sec_id = causa_secundaria_id or "Sin ID"
+                    warnings.setdefault("relaciones", []).append(
+                        f"'{prim_id} -> {sec_id}': {e}"
+                    )
 
-        logger.info("MatrizCNCLoader: secundarias creadas=%s, actualizadas=%s, saltadas=%s.", created_sec, updated_sec, skipped)
-        return {"created": created_sec, "updated": updated_sec, "skipped": skipped}
+            # Resumen final
+            stats = {
+                "causas_primarias_procesadas": causas_primarias_procesadas,
+                "causas_secundarias_procesadas": causas_secundarias_procesadas,
+                "relaciones_procesadas": relaciones_procesadas,
+                "total_filas": len(flat_rows),
+                "causas_primarias_unicas": len(primarias_cache),
+                "causas_secundarias_unicas": len(secundarias_cache),
+            }
+            
+            if not dry_run:
+                logger.info(f"✅ Matriz CNC procesada: {causas_primarias_procesadas} primarias, {causas_secundarias_procesadas} secundarias, {relaciones_procesadas} relaciones")
+            else:
+                logger.info(f"🔶 DRY RUN - Matriz CNC: {len(flat_rows)} filas a procesar")
+
+            return total_rows, {**warnings, **stats}, None
+
+        except Exception as e:
+            logger.exception("Error en persistencia de Matriz CNC: %s", e)
+            return 0, warnings, {"persist": str(e)}
+
+    def _crear_resumen_matriz_cnc(self, pod: Any, stats: Dict[str, Any]) -> None:
+        """Crea un registro de resumen de la matriz CNC"""
+        try:
+            from pretdb.models import ResumenMatrizCNC
+            resumen, created = ResumenMatrizCNC.objects.update_or_create(
+                pod=pod,
+                defaults={
+                    'total_causas_primarias': stats.get("causas_primarias_unicas", 0),
+                    'total_causas_secundarias': stats.get("causas_secundarias_unicas", 0),
+                    'total_relaciones': stats.get("relaciones_procesadas", 0),
+                }
+            )
+            if created:
+                logger.info(f"✅ Resumen Matriz CNC creado para POD {pod.numero_pod}")
+        except Exception as e:
+            logger.warning(f"No se pudo crear resumen de Matriz CNC: {e}")
+
+# Registro en el sistema de loaders
+def register_loader():
+    from etl.registry import register_loader
+    register_loader("matriz_cnc")(MatrizCNCLoader)

@@ -1,210 +1,281 @@
+# pretdb/etl/loaders/dotacion_maquinaria_loader.py
 from __future__ import annotations
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import logging
-
+from datetime import date, datetime
+from decimal import Decimal
 from django.db import transaction
 from django.apps import apps
 
 logger = logging.getLogger(__name__)
 
-# ---------- helpers pequeños ----------
-
-def _has_field(model, name: str) -> bool:
+def _get_model(app_label: str, model_name: str):
     try:
-        return any(getattr(f, "name", None) == name for f in model._meta.get_fields())
+        return apps.get_model(app_label, model_name)
+    except LookupError:
+        return None
+
+def _pick(d: Dict[str, Any], *keys: str, default=None):
+    for k in keys:
+        if k in d and d[k] not in (None, "", "<NA>"):
+            return d[k]
+    return default
+
+def _to_date(v) -> Optional[date]:
+    if v is None:
+        return None
+    if isinstance(v, date) and not isinstance(v, datetime):
+        return v
+    if isinstance(v, datetime):
+        return v.date()
+    try:
+        import pandas as pd
+        dt = pd.to_datetime(str(v), errors="coerce", dayfirst=True)
+        return None if pd.isna(dt) else dt.date()
     except Exception:
-        return False
+        return None
 
-def _pick_field(model, candidates: list[str]) -> Optional[str]:
-    for c in candidates:
-        if _has_field(model, c):
-            return c
-    return None
+def _to_decimal(val: Any) -> Optional[Decimal]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)) and not pd.isna(val):
+        try:
+            return Decimal(str(val))
+        except:
+            return None
+    try:
+        return Decimal(str(val).replace(',', '.'))
+    except (ValueError, TypeError):
+        return None
 
-def _build_defaults(model, source: dict, mapping: Dict[str, list[str]]) -> Dict[str, Any]:
-    """
-    Toma un mapping {dest_field: [candidatos_en_source]} y produce un dict solo con
-    los campos que EXISTEN en el modelo y están presentes en source.
-    """
-    out: Dict[str, Any] = {}
-    for dest, src_keys in mapping.items():
-        if not _has_field(model, dest):
-            continue
-        for k in src_keys:
-            if k in source and source[k] is not None and source[k] != "":
-                out[dest] = source[k]
-                break
-    return out
+def _to_int(val: Any) -> Optional[int]:
+    if val is None:
+        return None
+    if isinstance(val, (int, float)) and not pd.isna(val):
+        try:
+            return int(val)
+        except:
+            return None
+    try:
+        return int(float(str(val).replace(',', '.')))
+    except (ValueError, TypeError):
+        return None
+
+def _truncate(s: Optional[str], maxlen: int) -> Optional[str]:
+    if s is None:
+        return None
+    s = str(s)
+    return s[:maxlen] if len(s) > maxlen else s
 
 
 class DotacionMaquinariaLoader:
     """
-    Persiste lo producido por DotacionMaquinariaTransformer.
-    Tolera variaciones de modelos/fields:
-      - Dotación:  DotacionPersonal / DotacionEquipo
-      - Equipos:   DotacionEquipos / MaquinariaEquipo / Maquinaria / EquipoCompromiso (adjunto)
-    Clave natural aproximada:
-      - Dotación:  (pod, cargo)
-      - Equipos:   (pod, <key_field: descripcion_equipo|equipo|nombre>)
+    Carga datos de Dotación y Maquinaria desde el transformer
     """
+    
     def __init__(self) -> None:
-        # Resolve modelos de forma flexible
         pretdb = "pretdb"
-        self.Pod = apps.get_model(pretdb, "Pod")
-        self.DotacionModel = (
-            apps.get_model(pretdb, "DotacionPersonal", require_ready=False)
-            or apps.get_model(pretdb, "DotacionEquipo", require_ready=False)
-        )
-        self.EquiposModel = (
-            apps.get_model(pretdb, "DotacionEquipos", require_ready=False)
-            or apps.get_model(pretdb, "MaquinariaEquipo", require_ready=False)
-            or apps.get_model(pretdb, "Maquinaria", require_ready=False)
-            or apps.get_model(pretdb, "EquipoCompromiso", require_ready=False)  # fallback muy laxo
-            or apps.get_model(pretdb, "DotacionEquipo", require_ready=False)
-        )
-        # Relación de compromisos (si existe)
-        self.EquipoCompromiso = apps.get_model(pretdb, "EquipoCompromiso", require_ready=False)
-
-        # Campo clave de equipos (elegimos lo que exista primero)
-        self.equipo_key_field = None
-        if self.EquiposModel:
-            self.equipo_key_field = _pick_field(self.EquiposModel, ["descripcion_equipo", "equipo", "nombre"])
+        self.Pod = _get_model(pretdb, "Pod")
+        self.DotacionPersonal = _get_model(pretdb, "DotacionPersonal")
+        self.MaquinariaEquipo = _get_model(pretdb, "MaquinariaEquipo")
+        self.CompromisoMaquinaria = _get_model(pretdb, "CompromisoMaquinaria")
 
     @transaction.atomic
-    def persist(self, pod, out: dict, dry_run: bool = False) -> dict:
-        stats = {
-            "created_dotacion": 0,
-            "updated_dotacion": 0,
-            "created_equipos": 0,
-            "updated_equipos": 0,
-            "created_compromisos": 0,
-            "skipped_rows": 0,
-            "mode": "dry" if dry_run else "write",
-        }
+    def persist(
+        self,
+        pod,  # Objeto Pod ya creado desde portada
+        out: dict,
+        *,
+        dry_run: bool = False,
+        run_id: Optional[int] = None,
+    ) -> Tuple[int, Dict[str, Any], Optional[Dict[str, Any]]]:
+        """
+        Persiste los datos de Dotación y Maquinaria
+        
+        Returns:
+            Tuple[int, Dict, Optional[Dict]]: (rows_upserted, warnings, errors)
+        """
+        warnings = {}
+        errors = None
+        
+        if not self.Pod or not self.DotacionPersonal or not self.MaquinariaEquipo:
+            error_msg = "Modelos requeridos no encontrados"
+            logger.error(error_msg)
+            return 0, {}, {"models": error_msg}
 
-        rows = out.get("flat_rows") or []
-        if not rows:
-            return stats
+        if not pod or not isinstance(pod, self.Pod):
+            error_msg = "Pod no proporcionado o inválido"
+            logger.error(error_msg)
+            return 0, {}, {"pod": error_msg}
 
-        # Validaciones mínimas
-        if pod is None or not self.Pod:
-            logger.warning("DotacionMaquinariaLoader: 'pod' no provisto o modelo Pod inexistente. Skip.")
-            stats["skipped_rows"] = len(rows)
-            return stats
+        # Extraer datos del transformer
+        flat_rows = out.get("flat_rows", [])
+        summary = out.get("summary", {})
+        
+        if not flat_rows:
+            warnings["sin_datos"] = "No hay datos de Dotación y Maquinaria para procesar"
+            return 0, warnings, None
 
-        # ---------- DOTACIÓN ----------
-        for row in rows:
-            cargo = (row.get("cargo") or "").strip()
-            turno_a = row.get("turno_a")
-            turno_b = row.get("turno_b")
-            equipo  = (row.get("equipo") or "").strip()
+        # Estadísticas
+        total_rows = 0
+        dotacion_procesada = 0
+        maquinaria_procesada = 0
+        compromisos_procesados = 0
 
-            # 1) Dotación (si hay algo relacionado a personal)
-            if self.DotacionModel and (cargo or turno_a is not None or turno_b is not None):
+        try:
+            for row_data in flat_rows:
+                # Determinar si es dotación personal o maquinaria
+                es_dotacion = bool(row_data.get("cargo"))
+                es_maquinaria = bool(row_data.get("equipo"))
+                
                 if dry_run:
-                    # simulamos upsert
-                    stats["created_dotacion"] += 1
-                else:
+                    if es_dotacion:
+                        logger.debug(f"🔶 DRY RUN - Dotación: {row_data.get('cargo')}")
+                    elif es_maquinaria:
+                        logger.debug(f"🔶 DRY RUN - Maquinaria: {row_data.get('equipo')}")
+                    continue
+
+                # 1. Procesar dotación personal
+                if es_dotacion:
                     try:
-                        defaults = _build_defaults(
-                            self.DotacionModel,
-                            row,
-                            {
-                                "cargo": ["cargo"],
-                                "turno_a": ["turno_a"],
-                                "turno_b": ["turno_b"],
-                            },
+                        dotacion_obj, created = self.DotacionPersonal.objects.update_or_create(
+                            pod=pod,
+                            cargo=_truncate(row_data.get("cargo"), 100),
+                            defaults={
+                                'turno_a': _to_int(row_data.get("turno_a")),
+                                'turno_b': _to_int(row_data.get("turno_b")),
+                                'total': self._calcular_total_personal(row_data),
+                            }
                         )
-                        # Clave natural: (pod, cargo) si el modelo tiene ambos
-                        key = {}
-                        if _has_field(self.DotacionModel, "pod"): key["pod"] = pod
-                        if _has_field(self.DotacionModel, "cargo"): key["cargo"] = cargo or None
-                        obj, created = self.DotacionModel.objects.update_or_create(defaults=defaults, **key)
-                        stats["created_dotacion" if created else "updated_dotacion"] += 1
+                        if created:
+                            dotacion_procesada += 1
+                            total_rows += 1
                     except Exception as e:
-                        logger.debug("Dotacion upsert saltado (%s)", e)
-                        stats["skipped_rows"] += 1
+                        cargo = row_data.get('cargo', 'Sin cargo')
+                        warnings.setdefault("dotacion", []).append(f"'{cargo}': {e}")
 
-            # 2) Equipos (si hay equipo o métricas)
-            has_metrics = any(row.get(k) not in (None, "") for k in [
-                "peak", "proyectado", "total_en_obra", "equipos_en_falla", "equipo_en_mantencion",
-                "operadores_disponibles", "equipos_operativos", "reserva",
-                "observacion", "descripcion_falla", "compromiso_equipo", "fecha_compromiso_equipo",
-                "compromiso_operador", "fecha_compromiso_operador",
-            ])
-            if self.EquiposModel and (equipo or has_metrics):
-                if not self.equipo_key_field:
-                    self.equipo_key_field = _pick_field(self.EquiposModel, ["descripcion_equipo", "equipo", "nombre"])
-                key_field = self.equipo_key_field
-
-                # construir defaults en función de fields existentes del modelo
-                defaults_map = {
-                    # nombres "estándar"
-                    "equipo": ["equipo"],
-                    "descripcion_equipo": ["equipo"],
-                    "nombre": ["equipo"],
-                    "peak": ["peak"],
-                    "proyectado": ["proyectado"],
-                    "proyectado_rev2": ["proyectado"],
-                    "total_en_obra": ["total_en_obra"],
-                    "total_obra": ["total_en_obra"],
-                    "equipos_en_falla": ["equipos_en_falla"],
-                    "en_falla": ["equipos_en_falla"],
-                    "equipo_en_mantencion": ["equipo_en_mantencion"],
-                    "en_mantencion": ["equipo_en_mantencion"],
-                    "operadores_disponibles": ["operadores_disponibles"],
-                    "equipos_operativos": ["equipos_operativos"],
-                    "operativos": ["equipos_operativos"],
-                    "reserva": ["reserva"],
-                    "observacion": ["observacion"],
-                    "descripcion_falla": ["descripcion_falla"],
-                    "compromiso_equipo": ["compromiso_equipo"],
-                    "fecha_compromiso_equipo": ["fecha_compromiso_equipo"],
-                    "compromiso_operador": ["compromiso_operador"],
-                    "fecha_compromiso_operador": ["fecha_compromiso_operador"],
-                }
-                if dry_run:
-                    stats["created_equipos"] += 1
-                else:
+                # 2. Procesar maquinaria y equipos
+                if es_maquinaria:
                     try:
-                        defaults = _build_defaults(self.EquiposModel, row, defaults_map)
-                        key = {}
-                        if _has_field(self.EquiposModel, "pod"): key["pod"] = pod
-                        if key_field and equipo and _has_field(self.EquiposModel, key_field):
-                            key[key_field] = equipo
+                        maquinaria_obj, created = self.MaquinariaEquipo.objects.update_or_create(
+                            pod=pod,
+                            equipo=_truncate(row_data.get("equipo"), 100),
+                            defaults={
+                                'peak': _to_int(row_data.get("peak")),
+                                'proyectado': _to_int(row_data.get("proyectado")),
+                                'total_en_obra': _to_int(row_data.get("total_en_obra")),
+                                'equipos_en_falla': _to_int(row_data.get("equipos_en_falla")),
+                                'equipo_en_mantencion': _to_int(row_data.get("equipo_en_mantencion")),
+                                'operadores_disponibles': _to_int(row_data.get("operadores_disponibles")),
+                                'equipos_operativos': _to_int(row_data.get("equipos_operativos")),
+                                'reserva': _to_int(row_data.get("reserva")),
+                                'observacion': _truncate(row_data.get("observacion"), 200),
+                                'descripcion_falla': _truncate(row_data.get("descripcion_falla"), 500),
+                            }
+                        )
+                        if created:
+                            maquinaria_procesada += 1
+                            total_rows += 1
 
-                        obj, created = self.EquiposModel.objects.update_or_create(defaults=defaults, **key)
-                        stats["created_equipos" if created else "updated_equipos"] += 1
-
-                        # Adjuntar compromisos si existe modelo y hay datos
-                        if self.EquipoCompromiso and obj is not None and (
-                            row.get("descripcion_falla") or row.get("compromiso_equipo")
-                            or row.get("compromiso_operador")
-                        ):
-                            comp_defaults = _build_defaults(
-                                self.EquipoCompromiso,
-                                row,
-                                {
-                                    "descripcion_falla": ["descripcion_falla"],
-                                    "compromiso_equipo": ["compromiso_equipo"],
-                                    "fecha_equipo": ["fecha_compromiso_equipo"],
-                                    "compromiso_operador": ["compromiso_operador"],
-                                    "fecha_operador": ["fecha_compromiso_operador"],
-                                },
-                            )
-                            fk_name = _pick_field(self.EquipoCompromiso, ["equipo", "dotacion_equipo", "maquinaria", "parent"])
-                            if fk_name:
-                                comp = self.EquipoCompromiso(**{fk_name: obj}, **comp_defaults)
-                                comp.save()
-                                stats["created_compromisos"] += 1
+                        # 3. Procesar compromisos de maquinaria si existen
+                        compromiso_creado = self._procesar_compromisos(
+                            maquinaria_obj, row_data, warnings
+                        )
+                        if compromiso_creado:
+                            compromisos_procesados += 1
+                            total_rows += 1
+                            
                     except Exception as e:
-                        logger.debug("Equipos upsert saltado (%s)", e)
-                        stats["skipped_rows"] += 1
+                        equipo = row_data.get('equipo', 'Sin equipo')
+                        warnings.setdefault("maquinaria", []).append(f"'{equipo}': {e}")
 
-        # Mensajes informativos si falta algo
-        if not self.DotacionModel:
-            logger.info("DotacionMaquinariaLoader: Modelo de dotación no encontrado; no se insertó personal.")
-        if not self.EquiposModel:
-            logger.info("DotacionMaquinariaLoader: Modelo de equipos no encontrado; no se insertó maquinaria.")
+            # Resumen final
+            stats = {
+                "dotacion_procesada": dotacion_procesada,
+                "maquinaria_procesada": maquinaria_procesada,
+                "compromisos_procesados": compromisos_procesados,
+                "total_filas": len(flat_rows),
+                "cargos_unicos": len(set(r.get("cargo") for r in flat_rows if r.get("cargo"))),
+                "equipos_unicos": len(set(r.get("equipo") for r in flat_rows if r.get("equipo"))),
+            }
+            
+            if not dry_run:
+                logger.info(f"✅ Dotación y Maquinaria procesada: {dotacion_procesada} dotaciones, {maquinaria_procesada} equipos, {compromisos_procesados} compromisos")
+            else:
+                logger.info(f"🔶 DRY RUN - Dotación y Maquinaria: {len(flat_rows)} filas a procesar")
 
-        return stats
+            return total_rows, {**warnings, **stats}, None
+
+        except Exception as e:
+            logger.exception("Error en persistencia de Dotación y Maquinaria: %s", e)
+            return 0, warnings, {"persist": str(e)}
+
+    def _calcular_total_personal(self, row_data: Dict[str, Any]) -> Optional[int]:
+        """Calcula el total de personal sumando turno A y B"""
+        turno_a = _to_int(row_data.get("turno_a"))
+        turno_b = _to_int(row_data.get("turno_b"))
+        
+        if turno_a is None and turno_b is None:
+            return None
+        
+        total = 0
+        if turno_a is not None:
+            total += turno_a
+        if turno_b is not None:
+            total += turno_b
+            
+        return total if total > 0 else None
+
+    def _procesar_compromisos(self, maquinaria_obj: Any, row_data: Dict[str, Any], warnings: Dict[str, Any]) -> bool:
+        """Procesa los compromisos de equipo y operador"""
+        try:
+            compromiso_equipo = row_data.get("compromiso_equipo")
+            fecha_compromiso_equipo = _to_date(row_data.get("fecha_compromiso_equipo"))
+            compromiso_operador = row_data.get("compromiso_operador")
+            fecha_compromiso_operador = _to_date(row_data.get("fecha_compromiso_operador"))
+            
+            # Solo crear compromiso si hay datos
+            if not any([compromiso_equipo, fecha_compromiso_equipo, compromiso_operador, fecha_compromiso_operador]):
+                return False
+            
+            if self.CompromisoMaquinaria:
+                compromiso_obj, created = self.CompromisoMaquinaria.objects.update_or_create(
+                    maquinaria_equipo=maquinaria_obj,
+                    defaults={
+                        'compromiso_equipo': _truncate(compromiso_equipo, 200),
+                        'fecha_compromiso_equipo': fecha_compromiso_equipo,
+                        'compromiso_operador': _truncate(compromiso_operador, 200),
+                        'fecha_compromiso_operador': fecha_compromiso_operador,
+                    }
+                )
+                return created
+            return False
+            
+        except Exception as e:
+            equipo = row_data.get('equipo', 'Sin equipo')
+            warnings.setdefault("compromisos", []).append(f"'{equipo}': {e}")
+            return False
+
+    def _crear_resumen_dotacion(self, pod: Any, stats: Dict[str, Any]) -> None:
+        """Crea un registro de resumen de dotación y maquinaria"""
+        try:
+            from pretdb.models import ResumenDotacionMaquinaria
+            resumen, created = ResumenDotacionMaquinaria.objects.update_or_create(
+                pod=pod,
+                defaults={
+                    'total_personal': stats.get("dotacion_procesada", 0),
+                    'total_equipos': stats.get("maquinaria_procesada", 0),
+                    'total_compromisos': stats.get("compromisos_procesados", 0),
+                    'cargos_unicos': stats.get("cargos_unicos", 0),
+                    'equipos_unicos': stats.get("equipos_unicos", 0),
+                }
+            )
+            if created:
+                logger.info(f"✅ Resumen Dotación/Maquinaria creado para POD {pod.numero_pod}")
+        except Exception as e:
+            logger.warning(f"No se pudo crear resumen de Dotación/Maquinaria: {e}")
+
+# Registro en el sistema de loaders
+def register_loader():
+    from etl.registry import register_loader
+    register_loader("dotacion_y_maquinaria")(DotacionMaquinariaLoader)

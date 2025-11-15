@@ -4,6 +4,8 @@ import logging, re, unicodedata
 from datetime import datetime, date
 import pandas as pd
 
+from pretdb.etl.transformers.registry import register_transformer
+
 logger = logging.getLogger(__name__)
 
 # ------------------------- helpers -------------------------
@@ -60,17 +62,11 @@ KEY_PATTERNS: Dict[str, List[re.Pattern]] = {
     "jefe_turno_codelco": [re.compile(p, re.I) for p in [
         r"jefe\s*de\s*turno\s*codelco", r"\bcodelco\b.*\bjefe\s*de\s*turno\b", r"\bjefe\s*turno\b.*\bcodelco\b"
     ]],
-    "jefe_turno_fe_grande": [re.compile(p, re.I) for p in [
+    "jefe_turno_contratista": [re.compile(p, re.I) for p in [
         r"jefe\s*de\s*turno\s*(fe\s*grande|contratista|empresa)",
         r"(fe\s*grande|contratista|empresa).*\bjefe\s*de\s*turno\b"
     ]],
     "turno": [re.compile(r"^turno$", re.I)],
-    "contrato": [re.compile(p, re.I) for p in [r"\bcontrato\b", r"\bcodigo\s*contrato\b"]],
-    "empresa":  [re.compile(p, re.I) for p in [r"\bempresa\b", r"\bcontratista\b", r"\brazon\s*social\b"]],
-    "obra":     [re.compile(p, re.I) for p in [r"\bobra\b", r"\bactividad\b", r"\bfrente\b", r"\bproyecto\b"]],
-    "supervisor": [re.compile(p, re.I) for p in [r"\bsupervisor\b", r"\bjefe\s*de\s*terreno\b", r"\bresponsable\b"]],
-    "jornada":  [re.compile(p, re.I) for p in [r"\bjornada\b", r"\bhorario\b"]],
-    "clima":    [re.compile(p, re.I) for p in [r"\bclima\b", r"\bmeteorolog", r"\bcondiciones\b"]],
 }
 
 def _match_key(label: str) -> Optional[str]:
@@ -78,7 +74,7 @@ def _match_key(label: str) -> Optional[str]:
     if re.search(r"jefe\s*de\s*turno\s*codelco", lab, re.I):
         return "jefe_turno_codelco"
     if re.search(r"jefe\s*de\s*turno\s*(fe\s*grande|contratista|empresa)", lab, re.I):
-        return "jefe_turno_fe_grande"
+        return "jefe_turno_contratista"
     if re.fullmatch(r"turno", lab):
         return "turno"
     for key, pats in KEY_PATTERNS.items():
@@ -88,6 +84,7 @@ def _match_key(label: str) -> Optional[str]:
 
 # ------------------------- transformer -------------------------
 
+@register_transformer("portada")
 class PortadaTransformer:
     sheet_key = "portada"
 
@@ -184,30 +181,31 @@ class PortadaTransformer:
 
     def _to_record(self, kv: Dict[str, str]) -> Dict[str, Any]:
         rec: Dict[str, Any] = {}
+        # SOLO los 7 atributos requeridos
         if "pod_numero" in kv:          rec["pod_numero"] = _parse_pod_num(kv["pod_numero"])
-        if "fecha" in kv:               rec["fecha_pod"] = _parse_date(kv["fecha"])
-        if "inicio_periodo_pod" in kv:  rec["fecha_inicio_periodo_pod"] = _parse_date(kv["inicio_periodo_pod"])
-        if "termino_periodo_pod" in kv: rec["fecha_termino_periodo_pod"] = _parse_date(kv["termino_periodo_pod"])
+        if "fecha" in kv:               rec["fecha"] = _parse_date(kv["fecha"])
+        if "inicio_periodo_pod" in kv:  rec["inicio_periodo_pod"] = _parse_date(kv["inicio_periodo_pod"])
+        if "termino_periodo_pod" in kv: rec["termino_periodo_pod"] = _parse_date(kv["termino_periodo_pod"])
         if "jefe_turno_codelco" in kv:  rec["jefe_turno_codelco"] = _parse_str(kv["jefe_turno_codelco"])
-        if "jefe_turno_fe_grande" in kv:rec["jefe_turno_fe_grande"] = _parse_str(kv["jefe_turno_fe_grande"])
+        if "jefe_turno_contratista" in kv: rec["jefe_turno_contratista"] = _parse_str(kv["jefe_turno_contratista"])
         if "turno" in kv:               rec["turno"] = _parse_turno(kv["turno"])
-        if "contrato" in kv:            rec["contrato"]   = _parse_str(kv["contrato"])
-        if "empresa" in kv:             rec["empresa"]    = _parse_str(kv["empresa"])
-        if "obra" in kv:                rec["obra"]       = _parse_str(kv["obra"])
-        if "supervisor" in kv:          rec["supervisor"] = _parse_str(kv["supervisor"])
-        if "jornada" in kv:             rec["jornada"]    = _parse_str(kv["jornada"])
-        if "clima" in kv:               rec["clima"]      = _parse_str(kv["clima"])
+        
         return {k: v for k, v in rec.items() if v is not None}
 
 # ---------- shims opcionales ----------
 def persist_portada(out: dict, *, dry_run: bool = False, run_id: Optional[int] = None) -> dict:
     try:
-        from pretdb.etl.loaders import get_loader
-        loader = get_loader("portada")
+        from pretdb.etl.loaders import create_loader
+        loader = create_loader("portada")
         if not loader:
             return {"mode": "dry" if dry_run else "write", "skipped": len(out.get("flat_rows") or []),
                     "warning": "No loader registrado para 'portada'"}
-        return loader.persist(out, dry_run=dry_run, run_id=run_id)
+        return loader.persist(
+            pod=None,
+            out=out,
+            dry_run=dry_run,
+            run_id=run_id,
+        )
     except Exception as e:
         logger.exception("Error delegando persistencia portada: %s", e)
         return {"error": str(e), "mode": "dry" if dry_run else "write"}

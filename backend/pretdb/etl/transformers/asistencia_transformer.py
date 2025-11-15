@@ -7,6 +7,7 @@ import pandas as pd
 
 from django.db import transaction, connection
 from pretdb.models import Pod, Trabajador, Asistencia, AsistenciaDetalle, Contrato
+from pretdb.etl.transformers.registry import register_transformer
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ NOMBRE_PAT = re.compile(r"Nombre:\s*(.+)$", re.I)
 
 # ------------------------------ clase principal ------------------------------
 
+@register_transformer("asistencia")
 class AsistenciaTransformer:
     """Extrae detalle de asistencia por persona y por día desde '2. Asistencia' y persiste en modelos."""
     sheet_key = "asistencia"

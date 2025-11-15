@@ -1,25 +1,32 @@
-# pretdb/etl/transformers/registry.py
-from .portada_transformer import PortadaTransformer
-from pretdb.etl.transformers.asistencia_transformer import AsistenciaTransformer 
-from .sso_transformer import SSOTransformer
-from .plan_anterior_transformer import PlanAnteriorTransformer
-from .plan_dia_transformer import PlanDiaTransformer
-from .maquinaria_transformer import DotacionMaquinariaTransformer
-from .ppc_transformer import PPCTransformer
-from .compromiso_transformer import CompromisosTransformer
-from .matriz_cnc_transformer import MatrizCNCTransformer
-# from .asistencia_transformer import AsistenciaTransformer  # cuando lo tengas
+from __future__ import annotations
 
-REGISTRY = {
-    "portada": PortadaTransformer(),
-    "asistencia": AsistenciaTransformer(),
-    "sso": SSOTransformer(),
-    "plan_anterior": PlanAnteriorTransformer(),
-    "plan_dia": PlanDiaTransformer(),
-    "dotacion_y_maquinaria": DotacionMaquinariaTransformer(),
-    "ppc": PPCTransformer(),
-    "compromisos": CompromisosTransformer(),
-    "matriz_cnc": MatrizCNCTransformer(),
-    # "asistencia": AsistenciaTransformer(),
-}
+from typing import Any, Dict, List, Optional, Type
 
+TransformerCls = Type[Any]
+
+TRANSFORMER_REGISTRY: Dict[str, TransformerCls] = {}
+
+
+def register_transformer(sheet_key: str):
+    """
+    Decorador para mantener un registro centralizado de transformers disponibles.
+    """
+
+    def decorator(transformer_cls: TransformerCls) -> TransformerCls:
+        TRANSFORMER_REGISTRY[sheet_key] = transformer_cls
+        return transformer_cls
+
+    return decorator
+
+
+def get_transformer_class(sheet_key: str) -> Optional[TransformerCls]:
+    return TRANSFORMER_REGISTRY.get(sheet_key)
+
+
+def create_transformer(sheet_key: str) -> Optional[Any]:
+    cls = get_transformer_class(sheet_key)
+    return cls() if cls else None
+
+
+def available_transformers() -> List[str]:
+    return sorted(TRANSFORMER_REGISTRY.keys())

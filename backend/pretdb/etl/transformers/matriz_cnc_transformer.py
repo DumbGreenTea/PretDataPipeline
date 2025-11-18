@@ -126,6 +126,20 @@ def _row_key(row: dict) -> str:
     base += "|" + str(row.get("causa_primaria_id") or "")
     return hashlib.md5(base.encode("utf-8")).hexdigest()[:16]
 
+
+def _normalize_gestion_attr(val: Optional[str]) -> Optional[str]:
+    """
+    Normaliza valores de gestión atribuible a 'SI'/'NO'.
+    """
+    if _empty_text(val):
+        return None
+    s = _norm(val)
+    if s in ("si", "sí", "s", "true", "1"):
+        return "SI"
+    if s in ("no", "n", "false", "0"):
+        return "NO"
+    return val.strip() if val else None
+
 # ============================ patrones de header ============================
 
 HEADER_HINTS: Dict[str, re.Pattern] = {
@@ -133,6 +147,7 @@ HEADER_HINTS: Dict[str, re.Pattern] = {
     "causa_secundaria_desc": re.compile(r"\bcausa\s*secundaria\b", re.I),
     # Ids: N°, NRO, N, ID, etc. (una sola celda con ese texto)
     "id_code": re.compile(r"^(nro|n|id|n[.°º]?)$", re.I),
+    "gestion_atribuible": re.compile(r"gestion|atribuible", re.I),
 }
 
 # ============================= clase transformador =============================
@@ -168,6 +183,7 @@ class MatrizCNCTransformer:
                 "causa_primaria_desc": row.get("causa_primaria_desc"),
                 "causa_secundaria_id": row.get("causa_secundaria_id"),
                 "causa_secundaria_desc": row.get("causa_secundaria_desc"),
+                "gestion_atribuible": row.get("gestion_atribuible"),
             }
             flat_rows.append(flat)
 
@@ -176,6 +192,7 @@ class MatrizCNCTransformer:
                 "meta": {
                     "causa_primaria_id": row.get("causa_primaria_id"),
                     "causa_primaria_desc": row.get("causa_primaria_desc"),
+                    "gestion_atribuible": row.get("gestion_atribuible"),
                 },
                 "causa_secundaria": {
                     "causa_secundaria_id": row.get("causa_secundaria_id"),
@@ -280,6 +297,10 @@ class MatrizCNCTransformer:
             if score > best_score:
                 best_score = score
                 header_row = r
+                # Capturar gestión atribuible si existe en la fila evaluada
+                gest_cols = [c for c, s in enumerate(row_norm) if HEADER_HINTS["gestion_atribuible"].search(s)]
+                if gest_cols:
+                    colmap["gestion_atribuible"] = gest_cols[0]
                 best_map = colmap
 
         if header_row is None:
@@ -306,6 +327,7 @@ class MatrizCNCTransformer:
 
         current_id_primaria: Optional[str] = None
         current_causa_primaria_desc: Optional[str] = None
+        current_gestion_atribuible: Optional[str] = None
 
         parsed_rows: List[Dict[str, Any]] = []
 
@@ -314,6 +336,7 @@ class MatrizCNCTransformer:
             prim_desc    = _safe_str(df, r, colmap.get("causa_primaria_desc"))
             id_sec_raw   = _safe_str(df, r, colmap.get("causa_secundaria_id"))
             sec_desc     = _safe_str(df, r, colmap.get("causa_secundaria_desc"))
+            gestion_attr_raw = _safe_str(df, r, colmap.get("gestion_atribuible"))
 
             # Fin al detectar 3 filas vacías seguidas
             if _empty_text(id_prim_raw) and _empty_text(prim_desc) and _empty_text(id_sec_raw) and _empty_text(sec_desc):
@@ -329,6 +352,8 @@ class MatrizCNCTransformer:
                 current_id_primaria = _norm_code_id(id_prim_raw) or id_prim_raw
             if not _empty_text(prim_desc):
                 current_causa_primaria_desc = prim_desc
+            if not _empty_text(gestion_attr_raw):
+                current_gestion_atribuible = _normalize_gestion_attr(gestion_attr_raw)
 
             id_sec_norm = _norm_code_id(id_sec_raw) if id_sec_raw else None
 
@@ -337,6 +362,7 @@ class MatrizCNCTransformer:
                 "causa_primaria_desc": current_causa_primaria_desc,
                 "causa_secundaria_id": id_sec_norm,
                 "causa_secundaria_desc": sec_desc,
+                "gestion_atribuible": current_gestion_atribuible,
             }
 
             if _is_phantom_row(row_data):

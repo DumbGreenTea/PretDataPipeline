@@ -127,7 +127,12 @@ class DotacionMaquinariaLoader:
 
                 defaults = {
                     "fecha": _to_date(row_data.get("fecha")) or pod.fecha,
-                    "proyectado_rev2": _to_int(row_data.get("peak") or row_data.get("proyectado")),
+                    # Priorizar lo que venga expresamente como "Proyectado Rev2"
+                    "proyectado_rev2": _to_int(
+                        row_data.get("proyectado")
+                        if row_data.get("proyectado") not in (None, "", "<NA>")
+                        else row_data.get("peak")
+                    ),
                     "total_obra": _to_int(row_data.get("total_en_obra")),
                     "en_falla": _to_int(row_data.get("equipos_en_falla")),
                     "en_mantencion": _to_int(row_data.get("equipo_en_mantencion")),

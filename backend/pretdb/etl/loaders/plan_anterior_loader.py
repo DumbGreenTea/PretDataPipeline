@@ -58,13 +58,22 @@ def _to_decimal(val: Optional[float]) -> Optional[Decimal]:
     except:
         return None
 
+ZERO_DECIMAL = Decimal("0.00")
+
+def _decimal_or_zero(val: Optional[float]) -> Decimal:
+    dec = _to_decimal(val)
+    return dec if dec is not None else ZERO_DECIMAL
+
 def _to_decimal_pct(val: Optional[float]) -> Optional[Decimal]:
     """Convierte porcentaje (0-100 o 0-1) a Decimal"""
     if val is None:
         return None
     try:
         v = float(val)
-        if 0 <= v <= 1:  # Si viene como fracción (0.85)
+        # Excel suele entregar porcentajes como 0.xx aun cuando se vea 85%.
+        # Algunos valores grandes siguen llegando como 1.76 (176%). Consideramos
+        # cualquier valor menor o igual a 10 como fracción para robustez.
+        if 0 <= v <= 10:
             v *= 100.0
         return Decimal(str(v)).quantize(Decimal("0.01"))
     except:
@@ -260,14 +269,26 @@ class PlanAnteriorLoader:
     def _procesar_horas(self, actividad_obj: Any, actividad_data: Dict[str, Any], warnings: Dict[str, Any]) -> None:
         """Procesa los datos de horas semanales"""
         try:
+            prog_val = actividad_data.get("sem_cant_prog")
+            if prog_val is None:
+                prog_val = actividad_data.get("cant_programada")
+            real_val = actividad_data.get("sem_cant_real")
+            if real_val is None:
+                real_val = actividad_data.get("cant_real")
+            hh_prog = actividad_data.get("horas_hombre_programadas")
+            hh_real = actividad_data.get("horas_hombre_reales")
+            avance_val = actividad_data.get("sem_avance")
+            if avance_val is None:
+                avance_val = actividad_data.get("cumplimiento")
+
             horas_obj, created = self.PlanAnteriorHoras.objects.update_or_create(
                 plan_anterior=actividad_obj,
                 defaults={
-                    'cantidad_programada': _to_decimal(actividad_data.get("sem_cant_prog") or actividad_data.get("cant_programada")),
-                    'cantidad_real': _to_decimal(actividad_data.get("sem_cant_real") or actividad_data.get("cant_real")),
-                    'horas_hombre_programadas': None,  # Estos campos podrían venir de otras fuentes
-                    'horas_hombre_reales': None,
-                    'porcentaje_avance': _to_decimal_pct(actividad_data.get("sem_avance") or actividad_data.get("cumplimiento")),
+                    'cantidad_programada': _decimal_or_zero(prog_val),
+                    'cantidad_real': _decimal_or_zero(real_val),
+                    'horas_hombre_programadas': _to_decimal(hh_prog),
+                    'horas_hombre_reales': _to_decimal(hh_real),
+                    'porcentaje_avance': _to_decimal_pct(avance_val),
                 }
             )
         except Exception as e:

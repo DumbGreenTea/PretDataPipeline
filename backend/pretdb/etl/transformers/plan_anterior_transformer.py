@@ -146,7 +146,9 @@ def _to_decimal_pct(val: Optional[float]) -> Optional[Decimal]:
         return None
     try:
         v = float(val)
-        if 0 <= v <= 1:
+        # Para evitar falsos positivos de Excel (1.76 representando 176%, etc.)
+        # consideramos que todo valor pequeño (<=10) es fracción.
+        if 0 <= v <= 10:
             v *= 100.0
         d = Decimal(str(v)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return d
@@ -185,6 +187,8 @@ HEADER_HINTS = {
     "cant_programada": re.compile(r"\bcantidad\b.*programada|\bcant(idad)?\s*prog(?!\.)", re.I),
     "cant_real": re.compile(r"\bcantidad\b.*real(?!\.)|\bcant(idad)?\s*real(?!\.)\b", re.I),
     "cumplimiento": re.compile(r"\bcumpl(imiento)?\b|%.*cumpl", re.I),
+    "hh_programadas": re.compile(r"(hh|horas)(\s*hombre)?[^\w]*(prog|programad)", re.I),
+    "hh_reales": re.compile(r"(hh|horas)(\s*hombre)?[^\w]*(real|ejec)", re.I),
 
     "cnc_causa": re.compile(r"\bcausa\b", re.I),
     "cnc_subcausa": re.compile(r"\bsubcausa\b", re.I),
@@ -270,6 +274,8 @@ class PlanAnteriorTransformer:
                 "cant_programada": p.get("cant_programada"),
                 "cant_real": p.get("cant_real"),
                 "cumplimiento": p.get("cumplimiento"),
+                "horas_hombre_programadas": p.get("horas_hombre_programadas"),
+                "horas_hombre_reales": p.get("horas_hombre_reales"),
             } if p else None
 
             cnc_tag = None
@@ -316,6 +322,8 @@ class PlanAnteriorTransformer:
                 "cant_programada": p.get("cant_programada") if p else None,
                 "cant_real": p.get("cant_real") if p else None,
                 "cumplimiento": p.get("cumplimiento") if p else None,
+                "horas_hombre_programadas": p.get("horas_hombre_programadas") if p else None,
+                "horas_hombre_reales": p.get("horas_hombre_reales") if p else None,
                 "cnc_causa": cnc_tag.get("cnc_causa") if cnc_tag else None,
                 "cnc_subcausa": cnc_tag.get("cnc_subcausa") if cnc_tag else None,
                 "cnc_tipo": cnc_tag.get("cnc_tipo") if cnc_tag else None,
@@ -632,6 +640,8 @@ class PlanAnteriorTransformer:
             fc_avance = _safe_float(df, r, colmap.get("fc_%_avance"))
             if fc_avance is None and fc_forecast is not None and fc_forecast > 0 and fc_real is not None:
                 fc_avance = fc_real / fc_forecast
+            hh_prog = _safe_float(df, r, colmap.get("hh_programadas"))
+            hh_real = _safe_float(df, r, colmap.get("hh_reales"))
 
             timeline_vals: Dict[str, Optional[float]] = {}
             if timeline_cols:
@@ -664,6 +674,8 @@ class PlanAnteriorTransformer:
                 "cant_programada": cant_prog,
                 "cant_real": cant_real,
                 "cumplimiento": cumplimiento,
+                "horas_hombre_programadas": hh_prog,
+                "horas_hombre_reales": hh_real,
             }
             plan_dict[r] = plan_row
 

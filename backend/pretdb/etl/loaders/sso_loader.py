@@ -232,6 +232,9 @@ class SsoLoader:
     def _estado_to_choice(self, estado: Optional[str]) -> Optional[int]:
         if estado is None:
             return None
+        if isinstance(estado, int):
+            if estado in (0, 1, 2):
+                return estado
         normalized = str(estado).strip().lower()
         if normalized.startswith("verd"):
             return 0

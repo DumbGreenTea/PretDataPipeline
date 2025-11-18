@@ -75,6 +75,15 @@ class PlanDiaLoader:
         self.PlanDia = _get_model(pretdb, "PlanDia")
         self.HorarioInicio = _get_model(pretdb, "HorarioInicio")
         self.PlanDiaRestricciones = _get_model(pretdb, "PlanDiaRestricciones")
+        self.TipoGrupo = _get_model(pretdb, "TipoGrupo")
+        self.GrupoActividadesDia = _get_model(pretdb, "GrupoActividadesDia")
+        self.PlanDiaGrupo = _get_model(pretdb, "PlanDiaGrupo")
+
+        self._grupo_nombre_por_tipo = {
+            "realizable": "Plan Dia - Realizables",
+            "no_realizable": "Plan Dia - No Realizables",
+            "colchon": "Plan Dia - Colchon",
+        }
 
     @transaction.atomic
     def persist(
@@ -124,9 +133,9 @@ class PlanDiaLoader:
         try:
             # 1. Procesar actividades del plan del día
             for actividad_data in flat_rows:
-                # Determinar tipo de actividad basado en realizable
-                realizable = actividad_data.get("realizable")
-                tipo_actividad = self._determinar_tipo_actividad(realizable)
+                # Determinar tipo de actividad basado en el flag del transformer
+                realizable_flag = actividad_data.get("realizable")
+                tipo_actividad = actividad_data.get("tipo_actividad") or self._determinar_tipo_actividad(realizable_flag)
                 
                 if tipo_actividad == "realizable":
                     realizables_count += 1
@@ -157,12 +166,18 @@ class PlanDiaLoader:
                             'cantidad_programada': _to_float(actividad_data.get("cant_programada")),
                             'cantidad_proyectada_dia': _to_float(actividad_data.get("cant_proyectada_dia")),
                             'riesgos_criticos': _truncate(actividad_data.get("riesgos_criticos"), 200),
+                            'tipo_actividad': _truncate(tipo_actividad, 30) if tipo_actividad else None,
                         }
                     )
                     if created:
                         actividades_procesadas += 1
                         total_rows += 1
 
+                    self._attach_grupo_plan_dia(
+                        actividad_obj,
+                        tipo_actividad,
+                        warnings,
+                    )
                     self._persist_restriccion(
                         actividad_obj,
                         actividad_data.get("restricciones"),
@@ -228,14 +243,32 @@ class PlanDiaLoader:
         """
         Determina el tipo de actividad basado en el valor de 'realizable'
         """
-        if realizable == 1:
-            return "realizable"
-        elif realizable == 2:
-            return "colchon"
-        elif realizable == 0:
-            return "no_realizable"
-        else:
+        if realizable is None:
             return "indeterminado"
+        # Maneja texto como "realizable", "colchon", etc.
+        if isinstance(realizable, str):
+            text = realizable.strip().lower()
+            if text in ("realizable", "r", "si", "sí", "s"):
+                return "realizable"
+            if text in ("colchon", "colchón", "c"):
+                return "colchon"
+            if text in ("no_realizable", "no realizable", "n", "no"):
+                return "no_realizable"
+            try:
+                realizable = float(text)
+            except ValueError:
+                return "indeterminado"
+        try:
+            flag = int(round(float(realizable)))
+        except (TypeError, ValueError):
+            return "indeterminado"
+        if flag == 1:
+            return "realizable"
+        if flag == 2:
+            return "colchon"
+        if flag == 0:
+            return "no_realizable"
+        return "indeterminado"
 
     def _crear_resumen_plan_dia(self, pod: Any, stats: Dict[str, Any]) -> None:
         """Crea un registro de resumen del plan del día"""
@@ -276,3 +309,22 @@ class PlanDiaLoader:
             )
         except Exception as exc:
             warnings.setdefault("restricciones", []).append(str(exc))
+
+    def _attach_grupo_plan_dia(
+        self,
+        plan_dia_obj: Any,
+        tipo_actividad: str,
+        warnings: Dict[str, Any],
+    ) -> None:
+        """Asocia la actividad al grupo correspondiente según su tipo."""
+        if not plan_dia_obj or tipo_actividad not in self._grupo_nombre_por_tipo:
+            return
+        if not (self.TipoGrupo and self.GrupoActividadesDia and self.PlanDiaGrupo):
+            return
+        nombre_tipo = self._grupo_nombre_por_tipo[tipo_actividad]
+        try:
+            tipo_obj, _ = self.TipoGrupo.objects.get_or_create(nombre=nombre_tipo)
+            grupo_obj, _ = self.GrupoActividadesDia.objects.get_or_create(tipo_grupo=tipo_obj)
+            self.PlanDiaGrupo.objects.get_or_create(plan_dia=plan_dia_obj, grupo=grupo_obj)
+        except Exception as exc:
+            warnings.setdefault("grupos", []).append(str(exc))

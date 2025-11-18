@@ -428,6 +428,7 @@ class PlanDia(models.Model):
     cantidad_programada = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     cantidad_proyectada_dia = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     riesgos_criticos = models.CharField(max_length=200, blank=True, null=True)
+    tipo_actividad = models.CharField(max_length=30, blank=True, null=True)
 
     class Meta:
         indexes = [models.Index(fields=['fecha'])]
@@ -704,7 +705,7 @@ class CompromisoResumen(models.Model):
 # -----------------------------------------------------------------------------
 # MATRIZ CNC
 # -----------------------------------------------------------------------------
-class RegistroCnc(models.Model):
+class MatrizCNC(models.Model):
     # registro_cnc_id se crea automáticamente como 'id'
     pod = models.ForeignKey(
         Pod,

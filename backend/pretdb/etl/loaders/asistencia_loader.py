@@ -40,6 +40,7 @@ def _get_or_create_trabajador(
     nombre: str,
     codigo: Optional[str],
     empresa: Optional[str],
+    correo: Optional[str],
     Trabajador_model,
     Contratista_model,
 ):
@@ -68,9 +69,34 @@ def _get_or_create_trabajador(
                 )
                 return trabajador
 
+            fallback_filters = {"nombre": nombre_limpio}
+            if empresa_limpia:
+                fallback_filters["empresa"] = empresa_limpia
+            trabajador_nombre = Trabajador_model.objects.filter(**fallback_filters).first()
+            if trabajador_nombre:
+                update_fields = []
+                trabajador_nombre.codigo_trabajador = codigo_limpio
+                update_fields.append("codigo_trabajador")
+                if empresa_limpia and trabajador_nombre.empresa != empresa_limpia:
+                    trabajador_nombre.empresa = empresa_limpia
+                    update_fields.append("empresa")
+                if correo and trabajador_nombre.correo != _truncate(correo, 30):
+                    trabajador_nombre.correo = _truncate(correo, 30)
+                    update_fields.append("correo")
+                if update_fields:
+                    trabajador_nombre.save(update_fields=update_fields)
+                    logger.info(
+                        "♻️ Trabajador %s actualizado con código %s",
+                        nombre_limpio,
+                        codigo_limpio,
+                    )
+                return trabajador_nombre
+
             defaults = {"nombre": nombre_limpio}
             if empresa_limpia is not None:
                 defaults["empresa"] = empresa_limpia
+            if correo:
+                defaults["correo"] = _truncate(correo, 30)
 
             trabajador = Trabajador_model.objects.create(
                 codigo_trabajador=codigo_limpio,
@@ -263,6 +289,7 @@ class AsistenciaLoader:
         codigo = person_data.get("codigo")
         empresa = person_data.get("empresa", "")
         cargo = person_data.get("cargo", "")
+        correo = person_data.get("correo", "")
         
         if not nombre:
             warnings.setdefault("sin_nombre", []).append(str(codigo or "Sin código"))
@@ -272,6 +299,7 @@ class AsistenciaLoader:
             nombre=nombre,
             codigo=codigo,
             empresa=empresa,
+            correo=correo,
             Trabajador_model=self.Trabajador,
             Contratista_model=self.Contratista
         )
@@ -281,15 +309,18 @@ class AsistenciaLoader:
             return None
 
         # Actualizar metadata básica si cambió
-        updated = False
+        updated_fields: List[str] = []
         if cargo and getattr(trabajador, "cargo", None) != cargo:
             trabajador.cargo = _truncate(cargo, 20)
-            updated = True
+            updated_fields.append("cargo")
         if empresa and getattr(trabajador, "empresa", None) != empresa:
             trabajador.empresa = _truncate(empresa, 50)
-            updated = True
-        if updated:
-            trabajador.save(update_fields=["cargo", "empresa"])
+            updated_fields.append("empresa")
+        if correo and getattr(trabajador, "correo", None) != correo:
+            trabajador.correo = _truncate(correo, 30)
+            updated_fields.append("correo")
+        if updated_fields:
+            trabajador.save(update_fields=updated_fields)
 
         return trabajador
 

@@ -11,23 +11,20 @@ from pretdb.etl.loaders.registry import register_loader
 
 logger = logging.getLogger(__name__)
 
+
 def _get_model(app_label: str, model_name: str):
     try:
         return apps.get_model(app_label, model_name)
     except LookupError:
         return None
 
-def _pick(d: Dict[str, Any], *keys: str, default=None):
-    for k in keys:
-        if k in d and d[k] not in (None, "", "<NA>"):
-            return d[k]
-    return default
 
 def _truncate(s: Optional[str], maxlen: int) -> Optional[str]:
     if s is None:
         return None
     s = str(s)
     return s[:maxlen] if len(s) > maxlen else s
+
 
 def _norm_code_id(txt: Optional[str]) -> Optional[str]:
     """Normaliza códigos '1,1' / '1-1' -> '1.1'"""
@@ -44,6 +41,19 @@ def _norm_code_id(txt: Optional[str]) -> Optional[str]:
     return s
 
 
+def _code_to_int(code: Optional[str]) -> Optional[int]:
+    """Convierte un código (1.1, '02', etc.) a entero si solo contiene dígitos."""
+    if not code:
+        return None
+    digits = re.findall(r"\d+", str(code))
+    if not digits:
+        return None
+    try:
+        return int("".join(digits))
+    except ValueError:
+        return None
+
+
 @register_loader("matriz_cnc")
 class MatrizCNCLoader:
     """
@@ -53,8 +63,6 @@ class MatrizCNCLoader:
     def __init__(self) -> None:
         pretdb = "pretdb"
         self.Pod = _get_model(pretdb, "Pod")
-        self.CausaPrimaria = _get_model(pretdb, "CausaPrimaria")
-        self.CausaSecundaria = _get_model(pretdb, "CausaSecundaria")
         self.MatrizCNC = _get_model(pretdb, "MatrizCNC")
 
     @transaction.atomic
@@ -72,9 +80,8 @@ class MatrizCNCLoader:
         Returns:
             Tuple[int, Dict, Optional[Dict]]: (rows_upserted, warnings, errors)
         """
-        warnings = {}
-        errors = None
-        
+        warnings: Dict[str, List[str]] = {}
+
         if not self.Pod or not self.MatrizCNC:
             error_msg = "Modelos Pod o MatrizCNC no encontrados"
             logger.error(error_msg)
@@ -90,133 +97,98 @@ class MatrizCNCLoader:
         summary = out.get("summary", {})
         
         if not flat_rows:
-            warnings["sin_datos"] = "No hay datos de Matriz CNC para procesar"
+            warnings["sin_datos"] = ["No hay datos de Matriz CNC para procesar"]
             return 0, warnings, None
 
         # Estadísticas
         total_rows = 0
-        causas_primarias_procesadas = 0
-        causas_secundarias_procesadas = 0
-        relaciones_procesadas = 0
+        registros_creados = 0
+        registros_actualizados = 0
+        causas_primarias_unicas: set[str] = set()
+        causas_secundarias_unicas: set[str] = set()
 
         try:
-            # Diccionarios para cache de objetos creados
-            primarias_cache = {}
-            secundarias_cache = {}
+            if not dry_run:
+                deleted = self.RegistroCNC.objects.filter(pod=pod).delete()
+                logger.debug("Matriz CNC: %s registros previos eliminados para pod %s", deleted[0], pod.id)
 
             for row_data in flat_rows:
-                # Obtener y normalizar IDs
                 causa_primaria_id = _norm_code_id(row_data.get("causa_primaria_id"))
                 causa_primaria_desc = _truncate(row_data.get("causa_primaria_desc"), 200)
                 causa_secundaria_id = _norm_code_id(row_data.get("causa_secundaria_id"))
                 causa_secundaria_desc = _truncate(row_data.get("causa_secundaria_desc"), 200)
 
                 if dry_run:
-                    logger.debug(f"🔶 DRY RUN - CNC: Primaria {causa_primaria_id} -> Secundaria {causa_secundaria_id}")
+                    logger.debug(
+                        "🔶 DRY RUN - CNC: Primaria %s (%s) -> Secundaria %s",
+                        causa_primaria_id,
+                        causa_primaria_desc,
+                        causa_secundaria_id,
+                    )
+                    total_rows += 1
+                    if causa_primaria_desc:
+                        causas_primarias_unicas.add(causa_primaria_desc)
+                    if causa_secundaria_desc:
+                        causas_secundarias_unicas.add(causa_secundaria_desc)
                     continue
 
-                # 1. Procesar causa primaria
-                causa_primaria_obj = None
-                if causa_primaria_id or causa_primaria_desc:
-                    try:
-                        # Usar cache para evitar duplicados
-                        cache_key = f"{causa_primaria_id}_{causa_primaria_desc}"
-                        if cache_key not in primarias_cache:
-                            if self.CausaPrimaria:
-                                causa_primaria_obj, created = self.CausaPrimaria.objects.update_or_create(
-                                    codigo=causa_primaria_id,
-                                    defaults={
-                                        'descripcion': causa_primaria_desc,
-                                    }
-                                )
-                            else:
-                                # Si no existe el modelo CausaPrimaria, crear directamente en MatrizCNC
-                                causa_primaria_obj = None
-                            primarias_cache[cache_key] = causa_primaria_obj
-                            if created:
-                                causas_primarias_procesadas += 1
-                                total_rows += 1
-                        else:
-                            causa_primaria_obj = primarias_cache[cache_key]
-                    except Exception as e:
-                        warnings.setdefault("causas_primarias", []).append(
-                            f"'{causa_primaria_id}': {e}"
-                        )
-
-                # 2. Procesar causa secundaria
-                causa_secundaria_obj = None
-                if causa_secundaria_id or causa_secundaria_desc:
-                    try:
-                        cache_key = f"{causa_secundaria_id}_{causa_secundaria_desc}"
-                        if cache_key not in secundarias_cache:
-                            if self.CausaSecundaria:
-                                causa_secundaria_obj, created = self.CausaSecundaria.objects.update_or_create(
-                                    codigo=causa_secundaria_id,
-                                    defaults={
-                                        'descripcion': causa_secundaria_desc,
-                                    }
-                                )
-                            else:
-                                # Si no existe el modelo CausaSecundaria, crear directamente en MatrizCNC
-                                causa_secundaria_obj = None
-                            secundarias_cache[cache_key] = causa_secundaria_obj
-                            if created:
-                                causas_secundarias_procesadas += 1
-                                total_rows += 1
-                        else:
-                            causa_secundaria_obj = secundarias_cache[cache_key]
-                    except Exception as e:
-                        warnings.setdefault("causas_secundarias", []).append(
-                            f"'{causa_secundaria_id}': {e}"
-                        )
-
-                # 3. Crear relación en Matriz CNC
                 try:
-                    # Determinar clave única para la relación
-                    if causa_primaria_obj and causa_secundaria_obj:
-                        # Si tenemos ambos objetos, usar FKs
-                        matriz_obj, created = self.MatrizCNC.objects.update_or_create(
-                            pod=pod,
-                            causa_primaria=causa_primaria_obj,
-                            causa_secundaria=causa_secundaria_obj,
-                            defaults={}  # No hay campos adicionales por ahora
-                        )
-                    else:
-                        # Si no tenemos modelos separados, usar campos directos
-                        matriz_obj, created = self.MatrizCNC.objects.update_or_create(
-                            pod=pod,
-                            causa_primaria_codigo=causa_primaria_id,
-                            causa_primaria_desc=causa_primaria_desc,
-                            causa_secundaria_codigo=causa_secundaria_id,
-                            causa_secundaria_desc=causa_secundaria_desc,
-                            defaults={}
-                        )
-                    
+                    defaults = {
+                        "gestion_atribuible": row_data.get("gestion_atribuible"),
+                        "causa_primaria_num": _code_to_int(causa_primaria_id),
+                        "causa_primaria": causa_primaria_desc,
+                        "causa_secundaria_codigo": causa_secundaria_id,
+                        "causa_secundaria": causa_secundaria_desc,
+                    }
+
+                    filtro = {
+                        "pod": pod,
+                        "causa_primaria": causa_primaria_desc,
+                        "causa_secundaria": causa_secundaria_desc,
+                        "causa_secundaria_codigo": causa_secundaria_id,
+                    }
+
+                    registro_obj, created = self.MatrizCNC.objects.update_or_create(
+                        defaults=defaults,
+                        **filtro,
+                    )
+                    total_rows += 1
                     if created:
-                        relaciones_procesadas += 1
-                        total_rows += 1
-                        
-                except Exception as e:
-                    prim_id = causa_primaria_id or "Sin ID"
-                    sec_id = causa_secundaria_id or "Sin ID"
-                    warnings.setdefault("relaciones", []).append(
-                        f"'{prim_id} -> {sec_id}': {e}"
+                        registros_creados += 1
+                    else:
+                        registros_actualizados += 1
+                    if causa_primaria_desc:
+                        causas_primarias_unicas.add(causa_primaria_desc)
+                    if causa_secundaria_desc:
+                        causas_secundarias_unicas.add(causa_secundaria_desc)
+                except Exception as exc:
+                    prim_id = causa_primaria_id or causa_primaria_desc or "Sin ID"
+                    sec_id = causa_secundaria_id or causa_secundaria_desc or "Sin ID"
+                    warnings.setdefault("registros", []).append(
+                        f"{prim_id} -> {sec_id}: {exc}"
                     )
 
-            # Resumen final
             stats = {
-                "causas_primarias_procesadas": causas_primarias_procesadas,
-                "causas_secundarias_procesadas": causas_secundarias_procesadas,
-                "relaciones_procesadas": relaciones_procesadas,
                 "total_filas": len(flat_rows),
-                "causas_primarias_unicas": len(primarias_cache),
-                "causas_secundarias_unicas": len(secundarias_cache),
+                "registros_creados": registros_creados,
+                "registros_actualizados": registros_actualizados,
+                "causas_primarias_unicas": len(causas_primarias_unicas),
+                "causas_secundarias_unicas": len(causas_secundarias_unicas),
+                "relaciones_procesadas": registros_creados + registros_actualizados,
+                "resumen_transformer": summary.get("counts"),
             }
-            
+
             if not dry_run:
-                logger.info(f"✅ Matriz CNC procesada: {causas_primarias_procesadas} primarias, {causas_secundarias_procesadas} secundarias, {relaciones_procesadas} relaciones")
+                logger.info(
+                    "✅ Matriz CNC: %s registros creados, %s actualizados",
+                    registros_creados,
+                    registros_actualizados,
+                )
             else:
-                logger.info(f"🔶 DRY RUN - Matriz CNC: {len(flat_rows)} filas a procesar")
+                logger.info("🔶 DRY RUN - Matriz CNC: %s filas", len(flat_rows))
+
+            if not dry_run:
+                self._crear_resumen_matriz_cnc(pod, stats)
 
             return total_rows, {**warnings, **stats}, None
 

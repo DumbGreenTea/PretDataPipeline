@@ -94,6 +94,22 @@ def _row_key(row: dict) -> str:
     ])
     return hashlib.md5(base.encode("utf-8")).hexdigest()[:16]
 
+def _tipo_actividad_from_flag(flag: Optional[Any]) -> Optional[str]:
+    """Mapea el marcador de sección (1/2/0) a etiqueta de tipo."""
+    if flag is None:
+        return None
+    try:
+        flag_int = int(flag)
+    except (TypeError, ValueError):
+        return None
+    if flag_int == 1:
+        return "realizable"
+    if flag_int == 2:
+        return "colchon"
+    if flag_int == 0:
+        return "no_realizable"
+    return None
+
 # ============================ patrones de header ============================
 
 HEADER_HINTS = {
@@ -155,9 +171,12 @@ class PlanDiaTransformer:
 
         for row in parsed_rows_list:
             row_id = _row_key(row)
+            flag = row.get("realizable")
+            tipo_label = _tipo_actividad_from_flag(flag)
             meta_row = {
                 "nro_pod": row.get("nro_pod"),
-                "realizada": row.get("realizable"),
+                "realizable": flag,
+                "realizada": flag,  # compatibilidad histórica
                 "tipo_tc": row.get("tipo_tc"),
                 "fecha": row.get("fecha"),
                 "responsable": row.get("responsable"),
@@ -165,6 +184,7 @@ class PlanDiaTransformer:
                 "area_trabajo": row.get("area_trabajo"),
                 "descripcion_item": row.get("descripcion_item"),
                 "unidad": row.get("unidad"),
+                "tipo_actividad": tipo_label,
             }
             plan_dia_tag = {
                 "ruta_critica": row.get("ruta_critica"),
@@ -184,9 +204,9 @@ class PlanDiaTransformer:
             })
             flat_rows.append({"row_id": row_id, **meta_row, **plan_dia_tag})
 
-            if meta_row.get("realizada") in (1, 2):
+            if flag in (1, 2):
                 plan_realizables_list.append({"meta": meta_row, **plan_dia_tag})
-            elif meta_row.get("realizada") == 0:
+            elif flag == 0:
                 plan_no_realizables_list.append({"meta": meta_row, **plan_dia_tag})
 
         summary = {

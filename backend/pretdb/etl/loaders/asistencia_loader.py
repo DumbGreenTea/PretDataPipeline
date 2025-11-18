@@ -244,32 +244,39 @@ class AsistenciaLoader:
         """Busca o crea un contrato basado en los datos del transformer"""
         if not self.Contrato or not pod:
             return None
-            
+
         contrato_num = contrato_data.get("numero")
         contrato_nombre = contrato_data.get("nombre")
         codigo_limpio = _truncate(str(contrato_num).strip(), 20) if contrato_num else None
         nombre_limpio = _truncate((contrato_nombre or "").strip(), 120) or None
-        
+
         if not codigo_limpio and not nombre_limpio:
             return None
-            
+
         try:
-            filters = {"pod": pod}
+            filters = {}
             if codigo_limpio:
                 filters["nombre_codigo"] = codigo_limpio
             if nombre_limpio:
                 filters["nombre_contrato"] = nombre_limpio
 
             defaults = {}
-            if codigo_limpio:
+            if "nombre_codigo" not in filters and codigo_limpio:
                 defaults["nombre_codigo"] = codigo_limpio
-            if nombre_limpio or codigo_limpio:
-                defaults["nombre_contrato"] = nombre_limpio or (f"Contrato {codigo_limpio}" if codigo_limpio else None)
+            if "nombre_contrato" not in filters:
+                if nombre_limpio:
+                    defaults["nombre_contrato"] = nombre_limpio
+                elif codigo_limpio:
+                    defaults["nombre_contrato"] = f"Contrato {codigo_limpio}"
 
             contrato, created = self.Contrato.objects.get_or_create(
-                **filters,
                 defaults=defaults,
+                **filters,
             )
+
+            if pod.contrato_id != contrato.id:
+                pod.contrato = contrato
+                pod.save(update_fields=["contrato"])
 
             if created:
                 logger.info(
@@ -278,7 +285,7 @@ class AsistenciaLoader:
                     contrato.nombre_contrato or "sin nombre",
                 )
             return contrato
-            
+
         except Exception as e:
             logger.error(f"❌ Error creando contrato: {e}")
             return None

@@ -114,7 +114,7 @@ HEADER_HINTS: Dict[str, re.Pattern] = {
     "turno_a": re.compile(r"turno\s*a", re.I),
     "turno_b": re.compile(r"turno\s*b", re.I),
     # Derecha (Maquinaria)
-    "equipo": re.compile(r"\bequipo\b", re.I),
+    "equipo": re.compile(r"\bequipos?\b", re.I),
     "peak": re.compile(r"\bpeak\b", re.I),
     "proyectado": re.compile(r"proyectado", re.I),
     "total_en_obra": re.compile(r"total\s*de\s*equipo\s*en\s*obra|total\s*en\s*obra", re.I),

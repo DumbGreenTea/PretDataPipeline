@@ -51,6 +51,13 @@ class Pod(models.Model):
     numero_pod = models.IntegerField(unique=True) # uq_pod_numero
     fecha = models.DateField()
     turno = models.CharField(max_length=20, blank=True, null=True)
+    contrato = models.ForeignKey(
+        'Contrato',
+        on_delete=models.SET_NULL,
+        related_name='pods',
+        blank=True,
+        null=True
+    )
     
     # jefe_turno_codelco_id INT REFERENCES trabajador(trabajador_id)
     jefe_turno_codelco = models.ForeignKey(
@@ -86,27 +93,25 @@ class Pod(models.Model):
 
 class Contrato(models.Model):
     # contrato_id se crea automáticamente como 'id'
-    
-    # pod_id INT NOT NULL REFERENCES pod(pod_id) ON DELETE CASCADE
-    pod = models.ForeignKey(
-        Pod,
-        on_delete=models.CASCADE, # Si se borra el POD, se borra el contrato
-        related_name='contratos'
-    )
-    
     nombre_contrato = models.CharField(max_length=120, blank=True, null=True)
     nombre_codigo = models.CharField(max_length=20, blank=True, null=True)
 
     class Meta:
-        # CONSTRAINT uq_contrato_por_pod UNIQUE (pod_id, nombre_contrato, nombre_codigo);
         constraints = [
-            models.UniqueConstraint(fields=['pod', 'nombre_contrato', 'nombre_codigo'], name='uq_contrato_por_pod')
+            models.UniqueConstraint(
+                fields=['nombre_codigo', 'nombre_contrato'],
+                name='uq_contrato_codigo_nombre'
+            )
         ]
         verbose_name = "Contrato"
         verbose_name_plural = "Contratos"
 
     def __str__(self):
-        return self.nombre_contrato
+        if self.nombre_contrato:
+            return self.nombre_contrato
+        if self.nombre_codigo:
+            return self.nombre_codigo
+        return f"Contrato #{self.id}"
 
 
 # -----------------------------------------------------------------------------

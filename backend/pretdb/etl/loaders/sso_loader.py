@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import date, datetime
-from calendar import monthrange
+from calendar import monthrange, month_name
 
 import pandas as pd
 from django.db import transaction
@@ -38,6 +38,17 @@ def _to_date(v) -> Optional[date]:
         return None if pd.isna(dt) else dt.date()
     except Exception:
         return None
+
+def _mes_nombre(mes: Optional[int]) -> Optional[str]:
+    if mes is None:
+        return None
+    try:
+        mes_int = int(mes)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= mes_int <= 12:
+        return month_name[mes_int].title()
+    return None
 
 
 @register_loader("sso")
@@ -83,13 +94,34 @@ class SsoLoader:
             return 0, {}, {"pod": error_msg}
 
         # Extraer datos del transformer
-        summary = out.get("summary", {})
+        summary = out.get("summary", {}) or {}
         dias_detail = out.get("dias_detail", [])
         mes = summary.get("mes")
         anio = summary.get("anio")
+        mes_nombre = summary.get("mes_nombre")
+
+        fallback_mes = False
+        if (not mes or not anio) and getattr(pod, "fecha", None):
+            fecha_pod = pod.fecha
+            mes = mes or fecha_pod.month
+            anio = anio or fecha_pod.year
+            fallback_mes = True
         if not mes or not anio:
             warnings["datos_incompletos"] = "Faltan mes o año en los datos de SSO"
             return 0, warnings, None
+
+        mes_nombre = mes_nombre or _mes_nombre(mes)
+        if not fallback_mes and getattr(pod, "fecha", None) and pod.fecha.month != mes:
+            warnings.setdefault("mes_incongruente", []).append(
+                f"Hoja indica {mes_nombre or mes}, pero POD es {pod.fecha.strftime('%m/%Y')}."
+            )
+        if fallback_mes:
+            warnings.setdefault("mes_inferido", []).append(
+                f"Mes/año inferidos desde POD: {mes_nombre or mes}/{anio}"
+            )
+        summary["mes"] = mes
+        summary["anio"] = anio
+        summary["mes_nombre"] = mes_nombre
 
         try:
             fecha_inicio = date(anio, mes, 1)
@@ -203,6 +235,7 @@ class SsoLoader:
                 "estados_creados": estados_creados,
                 "reflexion_creada": reflexion_creada,
                 "mes_procesado": mes,
+                "mes_nombre": mes_nombre,
                 "anio_procesado": anio,
                 "hallazgos": hallazgos,
                 "tarjeta_verde": tarjeta_verde,

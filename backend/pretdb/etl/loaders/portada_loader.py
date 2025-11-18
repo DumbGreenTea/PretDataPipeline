@@ -1,6 +1,6 @@
 # pretdb/etl/loaders/portada_loader.py - VERSIÓN CORREGIDA
 from __future__ import annotations
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 from datetime import date, datetime
 from django.db import transaction, connection
@@ -36,28 +36,51 @@ def _to_date(v) -> Optional[date]:
     except Exception:
         return None
 
+def _normalize_name(nombre: str) -> Optional[str]:
+    if not nombre:
+        return None
+    nombre_limpio = " ".join(str(nombre).split())
+    return nombre_limpio or None
+
+def _pick_best_trabajador(candidates: List[Any]) -> Optional[Any]:
+    if not candidates:
+        return None
+
+    def score(t):
+        return (
+            1 if getattr(t, "codigo_trabajador", None) else 0,
+            1 if getattr(t, "empresa", None) else 0,
+            1 if getattr(t, "cargo", None) else 0,
+            1 if getattr(t, "correo", None) else 0,
+            -getattr(t, "id", 0),
+        )
+
+    return sorted(candidates, key=score, reverse=True)[0]
+
 def _get_or_create_trabajador(nombre: str, Trabajador_model):
-    """Busca o crea un Trabajador por nombre"""
+    """Busca o crea un Trabajador por nombre (ignorando mayúsculas y espacios)."""
     if not nombre or not Trabajador_model:
         return None
-    
-    nombre_limpio = nombre.strip()
+
+    nombre_limpio = _normalize_name(nombre)
     if not nombre_limpio:
         return None
-    
+
     try:
-        # Buscar por nombre
-        trabajador, created = Trabajador_model.objects.get_or_create(
-            nombre=nombre_limpio,
-            defaults={'nombre': nombre_limpio}
-        )
-        if created:
-            logger.info(f"✅ Trabajador creado: {nombre_limpio}")
-        else:
-            logger.debug(f"✅ Trabajador encontrado: {nombre_limpio}")
+        candidatos = list(Trabajador_model.objects.filter(nombre__iexact=nombre_limpio))
+        trabajador_existente = _pick_best_trabajador(candidatos)
+        if trabajador_existente:
+            if trabajador_existente.nombre != nombre_limpio:
+                trabajador_existente.nombre = nombre_limpio
+                trabajador_existente.save(update_fields=["nombre"])
+            logger.debug(f"✅ Trabajador encontrado: {nombre_limpio} (id={trabajador_existente.id})")
+            return trabajador_existente
+
+        trabajador = Trabajador_model.objects.create(nombre=nombre_limpio)
+        logger.info(f"✅ Trabajador creado: {nombre_limpio}")
         return trabajador
     except Exception as e:
-        logger.error(f"❌ Error creando trabajador {nombre_limpio}: {e}")
+        logger.error(f"❌ Error creando/buscando trabajador {nombre_limpio}: {e}")
         return None
 
 @register_loader("portada")

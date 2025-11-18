@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional, Tuple
 import logging, re
 from datetime import datetime, date, timedelta
+from calendar import month_name
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -21,6 +22,7 @@ MESES: Dict[str, int] = {
     "ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6,
     "JULIO": 7, "AGOSTO": 8, "SEPTIEMBRE": 9, "OCTUBRE": 10, "NOVIEMBRE": 11, "DICIEMBRE": 12,
 }
+MESES_INV: Dict[int, str] = {v: k.title() for k, v in MESES.items()}
 
 # Ajusta según tus colores reales (ya puestos con los códigos que detectaste)
 COLOR_A_ESTADO: Dict[str, int] = {
@@ -216,7 +218,17 @@ def _get_cell_color_hex(cell, theme_map: Dict[int, str]) -> Optional[str]:
 
     return None
 
-def _obtener_mes_y_anio(ws, df: pd.DataFrame) -> Tuple[int, int]:
+def _mes_nombre(mes: Optional[int]) -> Optional[str]:
+    if mes is None:
+        return None
+    mes_int = int(mes)
+    if mes_int in MESES_INV:
+        return MESES_INV[mes_int]
+    if 1 <= mes_int <= 12:
+        return month_name[mes_int].title()
+    return None
+
+def _obtener_mes_y_anio(ws, df: pd.DataFrame) -> Tuple[Optional[int], int]:
     mes_num: Optional[int] = None
     for row in ws.iter_rows(min_row=1, max_row=15, values_only=True):
         for value in row:
@@ -228,7 +240,7 @@ def _obtener_mes_y_anio(ws, df: pd.DataFrame) -> Tuple[int, int]:
         if mes_num is not None:
             break
     if mes_num is None:
-        raise ValueError("SSO: no se pudo detectar el mes en la hoja.")
+        logger.warning("SSO: no se pudo detectar el mes en la hoja; se usará fallback.")
 
     anio: Optional[int] = None
     for val in df.to_numpy().ravel():
@@ -347,6 +359,7 @@ class SSOTransformer:
         summary = {
             "mes": mes,
             "anio": anio,
+            "mes_nombre": _mes_nombre(mes),
             "n_dias_detectados": len(dias),
             "n_dias_con_estado": sum(1 for d in dias if d.get("estado") is not None),
             "hallazgos": hallazgos,

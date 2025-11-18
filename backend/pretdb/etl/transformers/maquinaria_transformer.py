@@ -203,7 +203,7 @@ class DotacionMaquinariaTransformer:
     def _find_header_and_columns(
         self, df: pd.DataFrame
     ) -> Tuple[Optional[int], Dict[str, Optional[int]]]:
-        nrows = min(len(df), 30)
+        nrows = min(len(df), 60)
         ncols = min(df.shape[1], 40)
         header_row: Optional[int] = None
         best_score = -1
@@ -238,7 +238,8 @@ class DotacionMaquinariaTransformer:
                         colmap["fecha_compromiso_operador"] = c
                         break
             score = sum(1 for v in colmap.values() if v is not None)
-            if (score > best_score and colmap.get("cargo") is not None and colmap.get("equipo") is not None):
+            has_equipo = colmap.get("equipo") is not None
+            if score > best_score and has_equipo:
                 best_score = score
                 header_row = r
                 best_map = colmap

@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 
 from pretdb.etl.transformers.registry import register_transformer
+from pretdb.etl.utils import parse_contract_from_df
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,7 @@ class CompromisosTransformer:
     ) -> dict:
         logger.debug("CompromisosTransformer.run_df: shape=%s", df_raw.shape)
         df = df_raw.copy()
+        contract_num, contract_name = parse_contract_from_df(df)
 
         compromisos = self._extract_compromisos(df)  # lista plana dicts
         flat_rows, unified_rows = self._to_flat_and_unified(compromisos)
@@ -104,6 +106,7 @@ class CompromisosTransformer:
             "summary": summary,
             "flat_rows": flat_rows,
             "unified": unified_rows,
+            "contract": {"numero": contract_num, "nombre": contract_name},
             "horarios_inicio": [],
             "by_tag": {"compromisos": flat_rows},
             "blocks": {"compromisos": unified_rows},
@@ -121,7 +124,18 @@ class CompromisosTransformer:
         max_rows = min(len(df), 80)
         for r in range(max_rows):
             row = df.iloc[r]
-            if any(isinstance(v, str) and "item" in _norm(v) for v in row):
+            norms = [_norm(v) for v in row if isinstance(v, str)]
+            if not norms:
+                continue
+            has_item_col = any(
+                ("item" in nv)
+                or re.search(r"\bn[º°o]?\b", nv)
+                or ("numero" in nv)
+                for nv in norms
+            )
+            has_desc_col = any("descripcion" in nv for nv in norms)
+            has_fecha_comp = any("fecha" in nv and "comprom" in nv for nv in norms)
+            if (has_item_col and has_desc_col) or (has_fecha_comp and has_desc_col):
                 headers.append(r)
         logger.debug("Compromisos: header_rows=%s", headers)
         return headers
@@ -146,21 +160,21 @@ class CompromisosTransformer:
             if not isinstance(val, str):
                 continue
             nv = _norm(val)
-            if "item" in nv and item_col is None:
+            if (("item" in nv) or re.search(r"\bn[º°o]?\b", nv) or "numero" in nv) and item_col is None:
                 item_col = c
             if ("descripcion" in nv or "descripción" in nv or "descripcion del compromiso" in nv) and desc_col is None:
                 desc_col = c
-            if "fecha toma" in nv and fecha_toma_col is None:
+            if (("fecha toma" in nv) or ("fecha" in nv and "comprom" in nv)) and fecha_toma_col is None:
                 fecha_toma_col = c
-            if "cierre" in nv and "proyect" in nv and fecha_cierre_proj_col is None:
+            if (("cierre" in nv and "proyect" in nv) or ("fecha" in nv and "proyect" in nv)) and fecha_cierre_proj_col is None:
                 fecha_cierre_proj_col = c
-            if "cierre" in nv and "efect" in nv and fecha_cierre_efec_col is None:
+            if (("fecha" in nv and "cierre" in nv) or ("cierre" in nv and "efect" in nv) or ("cierre" in nv and "real" in nv)) and fecha_cierre_efec_col is None:
                 fecha_cierre_efec_col = c
-            if "responsable" in nv and responsable_col is None:
+            if ("responsable" in nv or "resp" in nv) and responsable_col is None:
                 responsable_col = c
-            if "status" in nv and status_col is None:
+            if (("status" in nv) or ("estatus" in nv)) and status_col is None:
                 status_col = c
-            if "observacion" in nv and obs_col is None:
+            if (("observacion" in nv) or ("observación" in nv) or ("observaciones" in nv) or ("comentario" in nv)) and obs_col is None:
                 obs_col = c
 
         # Fallback: descripción a la derecha de Ítem

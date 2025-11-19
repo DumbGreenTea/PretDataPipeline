@@ -9,6 +9,7 @@ from django.apps import apps
 from pretdb.etl.loaders import create_loader
 from pretdb.etl.readers.excel_reader import ExcelReadError, ExcelReader
 from pretdb.etl.transformers import create_transformer
+from pretdb.etl.utils import ensure_pod_contract
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class ETLOrchestrator:
             self._PodModel = apps.get_model("pretdb", "Pod")
         except LookupError:
             self._PodModel = None
+        self._pods_contract_attached: set[int] = set()
 
     def process_sheet(
         self,
@@ -78,6 +80,8 @@ class ETLOrchestrator:
             logger.info("Transformando hoja '%s' (%s)", sheet_key, raw_sheet_name or sheet_key)
             transformer_result = transformer.run_df(df, meta=sheet_meta, dry_run=dry_run)
             result["transformer_result"] = transformer_result
+            contract_data = self._extract_contract_data(transformer_result)
+            result["contract_info"] = contract_data
 
             loader = create_loader(sheet_key)
             if not loader:
@@ -98,6 +102,8 @@ class ETLOrchestrator:
             result["status"] = "ok"
             result["success"] = True
             result["summary"] = self._format_loader_summary(transformer_result, loader_result)
+            if pod and contract_data:
+                self._maybe_attach_contract(pod, contract_data)
 
         except Exception as exc:
             logger.exception("Error procesando hoja '%s'", sheet_key)
@@ -144,14 +150,21 @@ class ETLOrchestrator:
             }
             return summary
 
+        ignored_keys: List[str] = []
         if self.ALLOWED_SHEETS:
-            original_keys = set(workbook.keys())
-            workbook = {k: v for k, v in workbook.items() if k in self.ALLOWED_SHEETS}
-            ignored = sorted(original_keys - set(workbook.keys()))
-            if ignored:
-                logger.info("Ignorando hojas no permitidas: %s", ", ".join(ignored))
+            original_keys = list(workbook.keys())
+            filtered = {}
+            for k in original_keys:
+                if k in self.ALLOWED_SHEETS:
+                    filtered[k] = workbook[k]
+                else:
+                    ignored_keys.append(k)
+            workbook = filtered
+            if ignored_keys:
+                logger.info("Ignorando hojas no permitidas: %s", ", ".join(ignored_keys))
 
         summary["sheets_detected"] = len(workbook)
+        summary["sheets_ignored"] = ignored_keys
         pod_context: Optional[Any] = None
         target_keys: Iterable[str]
         if sheets_to_process:
@@ -195,6 +208,10 @@ class ETLOrchestrator:
                 new_pod = self._extract_pod_from_loader(loader_info)
                 if new_pod:
                     pod_context = new_pod
+                contract_data = sheet_result.get("contract_info")
+                target_pod = pod_context if pod_context else new_pod
+                if contract_data and target_pod:
+                    self._maybe_attach_contract(target_pod, contract_data)
 
         summary["sheets_processed"] = sum(
             1 for item in summary["results"].values() if item.get("success")
@@ -268,6 +285,31 @@ class ETLOrchestrator:
         if loader_result is None:
             return {}
         return {"result": loader_result, "sheet": sheet_key}
+
+    def _extract_contract_data(self, transformer_result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not transformer_result:
+            return None
+        for key in ("contrato", "contract", "contract_info"):
+            data = transformer_result.get(key)
+            if data:
+                return data
+        return None
+
+    def _maybe_attach_contract(self, pod: Optional[Any], contract_data: Optional[Dict[str, Any]]) -> None:
+        if not pod or not contract_data:
+            return
+        pod_id = getattr(pod, "id", None)
+        if pod_id and pod_id in self._pods_contract_attached:
+            return
+        if getattr(pod, "contrato_id", None):
+            if pod_id:
+                self._pods_contract_attached.add(pod_id)
+            return
+        numero = contract_data.get("numero") if isinstance(contract_data, dict) else None
+        nombre = contract_data.get("nombre") if isinstance(contract_data, dict) else None
+        ensure_pod_contract(pod, numero, nombre)
+        if pod_id:
+            self._pods_contract_attached.add(pod_id)
 
 
 def run_file(

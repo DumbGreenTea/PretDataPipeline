@@ -63,6 +63,10 @@ class Command(BaseCommand):
         self.stdout.write(f"📄 Hojas detectadas: {results['sheets_detected']}")
         self.stdout.write(f"✅ Hojas exitosas: {results['sheets_processed']}")
         self.stdout.write(f"❌ Hojas con error: {results['sheets_detected'] - results['sheets_processed']}")
+        ignored = results.get("sheets_ignored") or []
+        self.stdout.write(f"⚪ Hojas ignoradas: {len(ignored)}")
+        if ignored:
+            self.stdout.write(f"   (saltadas: {', '.join(ignored[:5])}{'…' if len(ignored) > 5 else ''})")
         self.stdout.write(f"🔶 Dry Run: {results['dry_run']}")
         
         for sheet_key, sheet_result in results['results'].items():

@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import pandas as pd
 
 from pretdb.etl.transformers.registry import register_transformer
+from pretdb.etl.utils import parse_contract_from_df
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,7 @@ class DotacionMaquinariaTransformer:
     def run_df(self, df_raw: pd.DataFrame, meta: dict, dry_run: bool = False, **kwargs) -> dict:
         logger.debug("DotacionMaquinariaTransformer.run_df: shape=%s", df_raw.shape)
         df = df_raw.copy()
+        contract_num, contract_name = parse_contract_from_df(df)
 
         header_row, colmap = self._find_header_and_columns(df)
         if header_row is None:
@@ -195,6 +197,7 @@ class DotacionMaquinariaTransformer:
             "summary": summary,
             "flat_rows": flat_rows,
             "unified": unified_rows,
+            "contract": {"numero": contract_num, "nombre": contract_name},
             "horarios_inicio": [],
             "by_tag": {"dotacion_maquinaria": flat_rows},
             "blocks": {"dotacion_maquinaria": flat_rows},

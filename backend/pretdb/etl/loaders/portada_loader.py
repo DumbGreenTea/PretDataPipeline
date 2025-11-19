@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional, List
 import logging
+import unicodedata
 from datetime import date, datetime
 from django.db import transaction, connection
 from django.apps import apps
@@ -42,6 +43,14 @@ def _normalize_name(nombre: str) -> Optional[str]:
     nombre_limpio = " ".join(str(nombre).split())
     return nombre_limpio or None
 
+def _name_compare_key(nombre: Optional[str]) -> str:
+    if not nombre:
+        return ""
+    base = " ".join(str(nombre).split()).lower()
+    nfkd = unicodedata.normalize("NFD", base)
+    sin_tildes = "".join(ch for ch in nfkd if unicodedata.category(ch) != "Mn")
+    return sin_tildes
+
 def _pick_best_trabajador(candidates: List[Any]) -> Optional[Any]:
     if not candidates:
         return None
@@ -68,6 +77,17 @@ def _get_or_create_trabajador(nombre: str, Trabajador_model):
 
     try:
         candidatos = list(Trabajador_model.objects.filter(nombre__iexact=nombre_limpio))
+        if not candidatos:
+            key_objetivo = _name_compare_key(nombre_limpio)
+            primer_token = nombre_limpio.split(" ")[0] if nombre_limpio else ""
+            if primer_token and len(primer_token) >= 3:
+                qs = Trabajador_model.objects.filter(nombre__istartswith=primer_token[:3])
+            else:
+                qs = Trabajador_model.objects.all()
+            for candidato in qs:
+                if _name_compare_key(getattr(candidato, "nombre", "")) == key_objetivo:
+                    candidatos.append(candidato)
+
         trabajador_existente = _pick_best_trabajador(candidatos)
         if trabajador_existente:
             if trabajador_existente.nombre != nombre_limpio:

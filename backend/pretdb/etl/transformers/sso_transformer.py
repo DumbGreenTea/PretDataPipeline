@@ -10,6 +10,7 @@ from openpyxl import load_workbook
 from openpyxl.styles.colors import COLOR_INDEX
 
 from pretdb.etl.transformers.registry import register_transformer
+from pretdb.etl.utils import parse_contract_from_df
 
 from django.db import transaction, connection
 from pretdb.models import Pod, Sso, SsoCruzSeguridad, SsoEstadoDia, SsoReflexion
@@ -323,6 +324,7 @@ class SSOTransformer:
     ) -> Dict[str, Any]:
         logger.debug("SSOTransformer.run_df: shape=%s", df_raw.shape)
         df = df_raw.copy()
+        contract_num, contract_name = parse_contract_from_df(df)
 
         file_path = (
             kwargs.get("file_path")
@@ -373,6 +375,7 @@ class SSOTransformer:
             "summary": summary,
             "dias_detail": dias,
             "dry_run": dry_run,
+            "contract": {"numero": contract_num, "nombre": contract_name},
         }
 
     @transaction.atomic

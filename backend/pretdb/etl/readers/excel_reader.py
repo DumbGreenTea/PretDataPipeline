@@ -98,7 +98,8 @@ SHEET_PATTERNS: dict[str, list[str]] = {
         r"plan[\s\W]*por[\s\W]*cumpl",  # plan percent complete
     ],
     "plan_dia": [
-        r"\bplan[\s\W]*d[ií]a\b",       # plan día / plan dia
+        r"\bplan[\s\W]*(?:del\s+)?d[ií]a\b",       # plan día / plan del día
+        r"\bplan_dia\b",
     ],
 }
 

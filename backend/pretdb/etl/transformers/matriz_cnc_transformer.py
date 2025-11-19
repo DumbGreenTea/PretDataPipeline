@@ -6,6 +6,7 @@ from datetime import datetime, date
 import pandas as pd
 
 from pretdb.etl.transformers.registry import register_transformer
+from pretdb.etl.utils import parse_contract_from_df
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,7 @@ class MatrizCNCTransformer:
     def run_df(self, df_raw: pd.DataFrame, meta: dict, dry_run: bool = False, **kwargs) -> dict:
         logger.debug("MatrizCNCTransformer.run_df: shape=%s", df_raw.shape)
         df = df_raw.copy()
+        contract_num, contract_name = parse_contract_from_df(df)
 
         header_row, colmap = self._find_header_and_columns(df)
         if header_row is None:
@@ -216,6 +218,7 @@ class MatrizCNCTransformer:
             "flat_rows": flat_rows,
             "horarios_inicio": [],
             "unified": unified_rows,
+            "contract": {"numero": contract_num, "nombre": contract_name},
             "by_tag": {"matriz_cnc": flat_rows},
             "blocks": {"matriz_cnc": unified_rows},
         }

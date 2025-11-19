@@ -7,6 +7,7 @@ import pandas as pd
 
 from django.db import transaction, connection
 from pretdb.models import Pod, Trabajador, Asistencia, AsistenciaDetalle, Contrato
+from pretdb.etl.utils import parse_contract_from_df
 from pretdb.etl.transformers.registry import register_transformer
 
 logger = logging.getLogger(__name__)
@@ -133,10 +134,6 @@ SUMMARY_ROW_FLAGS = (
     "no asiste",
 )
 
-# Header contrato en hoja asistencia
-CONTRATO_PAT = re.compile(r"Contrato:\s*([0-9]{6,})", re.I)
-NOMBRE_PAT = re.compile(r"Nombre:\s*(.+)$", re.I)
-
 # ------------------------------ clase principal ------------------------------
 
 @register_transformer("asistencia")
@@ -152,7 +149,7 @@ class AsistenciaTransformer:
         df = df_raw.copy()
 
         # (Opcional) Leer contrato/nombre desde encabezado de la hoja Asistencia
-        contrato_num, contrato_nombre = self._parse_contrato_header(df)
+        contrato_num, contrato_nombre = parse_contract_from_df(df)
 
         header_row, colmap_person, colmap_days = self._find_header_and_columns(df)
         if header_row is None:
@@ -263,32 +260,6 @@ class AsistenciaTransformer:
             return Pod.objects.get(id=row[0])
         except Pod.DoesNotExist:
             return None
-
-    def _parse_contrato_header(self, df: pd.DataFrame, max_rows: int = 20, max_cols: int = 10) -> Tuple[Optional[str], Optional[str]]:
-        num = None
-        nombre = None
-        sub = df.iloc[:max_rows, :max_cols].fillna("")
-        for _, row in sub.iterrows():
-            line = "  ".join([str(x) for x in row.tolist()])
-            line = re.sub(r"\s+", " ", line).strip()
-            if not num:
-                m1 = CONTRATO_PAT.search(line)
-                if m1: num = m1.group(1)
-            if not nombre:
-                m2 = NOMBRE_PAT.search(line)
-                if m2: nombre = m2.group(1).strip()
-            if num and nombre:
-                break
-            # por si vienen en celdas separadas
-            for cell in row.tolist():
-                s = str(cell)
-                if not num:
-                    m1c = CONTRATO_PAT.search(s)
-                    if m1c: num = m1c.group(1)
-                if not nombre:
-                    m2c = NOMBRE_PAT.search(s)
-                    if m2c: nombre = m2c.group(1).strip()
-        return num, nombre
 
     def _find_header_and_columns(
         self, df: pd.DataFrame

@@ -32,7 +32,12 @@ SECRET_KEY = 'django-insecure-)11=fmki*soxb9x7dob_tqem*iq8l&2@axxiqk6e&3i8do%wd$
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+# Allow local dev hosts by default; can be overridden with ALLOWED_HOSTS env var (comma-separated)
+env_allowed = os.environ.get("ALLOWED_HOSTS", "")
+if env_allowed:
+    ALLOWED_HOSTS = [h.strip() for h in env_allowed.split(",") if h.strip()]
+else:
+    ALLOWED_HOSTS = ["localhost", "127.0.0.1", "backend"]
 
 
 # Application definition
